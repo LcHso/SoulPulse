@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+soulpulse.db
+*.db-journal
+.vscode/
+.idea/
+chroma_data/
