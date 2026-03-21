@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from core.config import settings
@@ -109,6 +110,7 @@ async def extract_and_store_memories(
                     "user_id": str(user_id),
                     "ai_id": str(ai_id),
                     "memory_type": mem_type,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                 }
                 await asyncio.to_thread(
                     vector_store.add_memory, vid, embeddings[i], content, metadata
@@ -143,6 +145,7 @@ async def get_contextual_memories(
     query_text: str,
     intimacy: float,
     top_k: int = 5,
+    precomputed_embedding: list[float] | None = None,
 ) -> list[dict]:
     """Retrieve relevant memories for the current conversation context.
 
@@ -151,8 +154,9 @@ async def get_contextual_memories(
       - Lv 6-10: both "fact" and "emotion" memories (deep: feelings, history)
 
     Always filters by user_id — strict multi-tenant isolation.
+    Returns dicts with type, content, relevance, and age_hours for fidelity tiers.
     """
-    embedding = await embedding_service.get_embedding(query_text)
+    embedding = precomputed_embedding or await embedding_service.get_embedding(query_text)
 
     memory_types: Optional[list[str]] = ["fact"] if intimacy < 6 else None
 
@@ -161,20 +165,66 @@ async def get_contextual_memories(
         embedding, user_id, ai_id, top_k, memory_types,
     )
 
-    return [
-        {
+    now = datetime.now(timezone.utc)
+    memories = []
+    for r in results:
+        created_str = r["metadata"].get("created_at", "")
+        if created_str:
+            try:
+                created_dt = datetime.fromisoformat(created_str)
+                age_hours = (now - created_dt).total_seconds() / 3600
+            except (ValueError, TypeError):
+                age_hours = 999.0  # parse error → treat as distant
+        else:
+            age_hours = 999.0  # no timestamp (legacy) → treat as distant
+
+        memories.append({
             "type": r["metadata"].get("memory_type", "fact"),
             "content": r["content"],
-            "relevance": 1.0 - r["distance"],  # cosine distance -> similarity
-        }
-        for r in results
-    ]
+            "relevance": 1.0 - r["distance"],
+            "age_hours": age_hours,
+        })
+
+    return memories
+
+
+# ── Fidelity helpers ───────────────────────────────────────────
+
+_FIDELITY_FRESH_HOURS = 24       # < 24h → precise recall
+_FIDELITY_FADING_HOURS = 168     # 24h–7d → fuzzy recall
+
+
+def _age_tier(age_hours: float) -> str:
+    """Classify memory age into a recall-fidelity tier."""
+    if age_hours < _FIDELITY_FRESH_HOURS:
+        return "fresh"
+    if age_hours < _FIDELITY_FADING_HOURS:
+        return "fading"
+    return "distant"
 
 
 # ── Formatting ─────────────────────────────────────────────────
 
+_RECALL_GUIDE = (
+    "\nMemory Recall Rules:\n"
+    "- [fresh]: You recall these clearly. Reference them precisely.\n"
+    "- [fading]: You remember the pattern/emotion, but names, dates, numbers "
+    "may be slightly off. Paraphrase rather than quote. "
+    "Say \"I think...\" or \"wasn't it something like...\"\n"
+    "- [distant]: You recall only the core feeling. Specific names, dates, "
+    "times have faded. Say things like \"I vaguely remember...\" or "
+    "\"didn't you once mention...\"\n"
+    "This is natural — nobody remembers everything perfectly."
+)
+
+
 def format_memories_for_prompt(memories: list[dict]) -> str:
     """Format retrieved memories as a block for system prompt injection.
+
+    Each memory is tagged with a recall-fidelity tier based on its age:
+      - [fresh]   (< 24 h) — precise recall
+      - [fading]  (1-7 days) — fuzzy recall
+      - [distant] (> 7 days or unknown age) — only core feeling
 
     Returns empty string if no memories (keeps prompt clean for new users).
     """
@@ -184,12 +234,14 @@ def format_memories_for_prompt(memories: list[dict]) -> str:
     lines = []
     for m in memories:
         tag = m.get("type", "fact")
-        lines.append(f"- [{tag}] {m['content']}")
+        tier = _age_tier(m.get("age_hours", 999.0))
+        lines.append(f"- [{tag}] [{tier}] {m['content']}")
 
     return (
         "## Your Memories About This User\n"
         "You remember the following about the person you're chatting with:\n"
         + "\n".join(lines) + "\n\n"
         "Use these memories naturally in conversation. Reference them when relevant, "
-        "but don't list them mechanically. Never reveal that you have a 'memory system'."
+        "but don't list them mechanically. Never reveal that you have a 'memory system'.\n"
+        + _RECALL_GUIDE
     )

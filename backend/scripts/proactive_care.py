@@ -1,8 +1,13 @@
-"""Proactive care scheduler.
+"""Proactive care scheduler.  *** DEPRECATED ***
 
-Runs every 24 hours. For each user with intimacy > 7, scans long-term
-memories for schedule-related events (exams, meetings, trips, etc.)
-and generates a caring DM from the AI companion.
+This scheduler has been superseded by scripts/emotion_scheduler.py, which
+subsumes the memory-care DM logic as one of several emotion-driven proactive
+triggers.  Kept here for reference only — run emotion_scheduler.py instead.
+
+Original behaviour:
+  Runs every 24 hours. For each user with intimacy > 7, scans long-term
+  memories for schedule-related events (exams, meetings, trips, etc.)
+  and generates a caring DM from the AI companion.
 
 Run from the backend directory:
     python3 scripts/proactive_care.py

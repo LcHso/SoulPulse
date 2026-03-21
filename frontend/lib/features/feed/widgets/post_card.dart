@@ -1,11 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:timeago/timeago.dart' as timeago;
+import '../../../core/widgets/image_viewer.dart';
 import 'heart_animation.dart';
-import '../../../core/api/api_client.dart';
 
 class PostCard extends StatefulWidget {
   final Map<String, dynamic> post;
-  final VoidCallback onDoubleTap;
+  final VoidCallback onLike;
+  final VoidCallback? onSave;
   final VoidCallback onDM;
   final VoidCallback? onProfileTap;
   final VoidCallback? onComment;
@@ -13,7 +17,8 @@ class PostCard extends StatefulWidget {
   const PostCard({
     super.key,
     required this.post,
-    required this.onDoubleTap,
+    required this.onLike,
+    this.onSave,
     required this.onDM,
     this.onProfileTap,
     this.onComment,
@@ -25,23 +30,38 @@ class PostCard extends StatefulWidget {
 
 class _PostCardState extends State<PostCard> {
   bool _showHeart = false;
-  bool _liked = false;
 
   void _handleDoubleTap() {
-    setState(() {
-      _showHeart = true;
-      _liked = true;
-    });
-    widget.onDoubleTap();
+    if (widget.post['is_liked'] != true) {
+      widget.onLike();
+    }
+    setState(() => _showHeart = true);
+    HapticFeedback.lightImpact();
     Future.delayed(const Duration(milliseconds: 800), () {
       if (mounted) setState(() => _showHeart = false);
     });
+  }
+
+  String _formatTime(String? isoString) {
+    if (isoString == null || isoString.isEmpty) return '';
+    try {
+      return timeago.format(DateTime.parse(isoString).toLocal());
+    } catch (_) {
+      return '';
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final post = widget.post;
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final isLiked = post['is_liked'] == true;
+    final isSaved = post['is_saved'] == true;
+    final likeCount = (post['like_count'] as int?) ?? 0;
+    final commentCount = (post['comment_count'] as int?) ?? 0;
+    final avatarUrl = post['ai_avatar'] as String? ?? '';
+    final mediaUrl = post['media_url'] as String? ?? '';
+    final createdAt = post['created_at'] as String?;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -53,37 +73,30 @@ class _PostCardState extends State<PostCard> {
             onTap: widget.onProfileTap,
             child: Row(
               children: [
-                CircleAvatar(
-                  radius: 16,
-                  backgroundColor: Colors.grey[300],
-                  child: Text(
-                    (post['ai_name'] as String? ?? 'A')[0],
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.w600,
-                      color: Colors.grey[700],
-                    ),
-                  ),
-                ),
+                _buildAvatar(avatarUrl, post['ai_name'] as String? ?? 'A', 16),
                 const SizedBox(width: 10),
                 Text(
                   post['ai_name'] ?? 'AI',
                   style: GoogleFonts.inter(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                  ),
+                      fontWeight: FontWeight.w600, fontSize: 14),
                 ),
               ],
             ),
           ),
         ),
 
-        // Image area with double-tap heart
+        // Image area with double-tap heart, single tap for fullscreen
         GestureDetector(
           onDoubleTap: _handleDoubleTap,
+          onTap: () {
+            if (mediaUrl.isNotEmpty) {
+              ImageViewer.show(context, mediaUrl,
+                  heroTag: 'post_${post['id']}');
+            }
+          },
           child: Stack(
             alignment: Alignment.center,
             children: [
-              // Post image placeholder (4:5 aspect ratio like Instagram)
               AspectRatio(
                 aspectRatio: 4 / 5,
                 child: Container(
@@ -91,25 +104,17 @@ class _PostCardState extends State<PostCard> {
                   color: isDark
                       ? const Color(0xFF1A1A1A)
                       : const Color(0xFFF0F0F0),
-                  child: post['media_url'] != null &&
-                          (post['media_url'] as String).isNotEmpty
-                      ? Image.network(
-                          ApiClient.proxyImageUrl(post['media_url']),
+                  child: mediaUrl.isNotEmpty
+                      ? CachedNetworkImage(
+                          imageUrl: mediaUrl,
                           fit: BoxFit.cover,
-                          loadingBuilder: (context, child, progress) {
-                            if (progress == null) return child;
-                            return Center(
-                              child: CircularProgressIndicator(
-                                value: progress.expectedTotalBytes != null
-                                    ? progress.cumulativeBytesLoaded /
-                                        progress.expectedTotalBytes!
-                                    : null,
-                                strokeWidth: 2,
-                                color: Colors.grey[400],
-                              ),
-                            );
-                          },
-                          errorBuilder: (context, error, stack) => Center(
+                          placeholder: (context, url) => Center(
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.grey[400],
+                            ),
+                          ),
+                          errorWidget: (context, url, error) => Center(
                             child: Icon(Icons.broken_image_outlined,
                                 size: 48, color: Colors.grey[400]),
                           ),
@@ -118,18 +123,19 @@ class _PostCardState extends State<PostCard> {
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(
-                                Icons.camera_alt_outlined,
-                                size: 48,
-                                color: Colors.grey[500],
-                              ),
+                              Icon(Icons.camera_alt_outlined,
+                                  size: 48, color: Colors.grey[500]),
                               const SizedBox(height: 8),
-                              Text(
-                                post['caption'] ?? '',
-                                textAlign: TextAlign.center,
-                                style: GoogleFonts.inter(
-                                  fontSize: 16,
-                                  color: Colors.grey[500],
+                              Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 24),
+                                child: Text(
+                                  post['caption'] ?? '',
+                                  textAlign: TextAlign.center,
+                                  maxLines: 4,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: GoogleFonts.inter(
+                                      fontSize: 16, color: Colors.grey[500]),
                                 ),
                               ),
                             ],
@@ -137,26 +143,24 @@ class _PostCardState extends State<PostCard> {
                         ),
                 ),
               ),
-
-              // Heart animation overlay
               if (_showHeart) const HeartAnimation(),
             ],
           ),
         ),
 
-        // Action bar: like, comment, DM
+        // Action bar: like, comment, DM, save
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
             children: [
               GestureDetector(
                 onTap: () {
-                  setState(() => _liked = !_liked);
-                  if (_liked) widget.onDoubleTap();
+                  widget.onLike();
+                  HapticFeedback.lightImpact();
                 },
                 child: Icon(
-                  _liked ? Icons.favorite : Icons.favorite_border,
-                  color: _liked ? const Color(0xFFED4956) : null,
+                  isLiked ? Icons.favorite : Icons.favorite_border,
+                  color: isLiked ? const Color(0xFFED4956) : null,
                   size: 28,
                 ),
               ),
@@ -170,6 +174,20 @@ class _PostCardState extends State<PostCard> {
                 onTap: widget.onDM,
                 child: const Icon(Icons.send_outlined, size: 26),
               ),
+              const Spacer(),
+              if (widget.onSave != null)
+                GestureDetector(
+                  onTap: () {
+                    widget.onSave!();
+                    HapticFeedback.lightImpact();
+                  },
+                  child: Icon(
+                    isSaved ? Icons.bookmark : Icons.bookmark_border,
+                    color:
+                        isSaved ? Theme.of(context).colorScheme.primary : null,
+                    size: 28,
+                  ),
+                ),
             ],
           ),
         ),
@@ -178,17 +196,14 @@ class _PostCardState extends State<PostCard> {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14),
           child: Text(
-            '${post['like_count'] ?? 0} likes',
-            style: GoogleFonts.inter(
-              fontWeight: FontWeight.w600,
-              fontSize: 13,
-            ),
+            '$likeCount likes',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13),
           ),
         ),
 
         // Caption
         Padding(
-          padding: const EdgeInsets.fromLTRB(14, 4, 14, 12),
+          padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
           child: RichText(
             text: TextSpan(
               style: GoogleFonts.inter(
@@ -206,8 +221,62 @@ class _PostCardState extends State<PostCard> {
           ),
         ),
 
+        // Comment count
+        if (commentCount > 0)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 2, 14, 0),
+            child: GestureDetector(
+              onTap: widget.onComment,
+              child: Text(
+                'View all $commentCount comments',
+                style: GoogleFonts.inter(fontSize: 13, color: Colors.grey[500]),
+              ),
+            ),
+          ),
+
+        // Timestamp
+        if (createdAt != null)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
+            child: Text(
+              _formatTime(createdAt),
+              style: GoogleFonts.inter(fontSize: 11, color: Colors.grey[500]),
+            ),
+          ),
+
         Divider(height: 1, color: Colors.grey.withValues(alpha: 0.15)),
       ],
+    );
+  }
+
+  Widget _buildAvatar(String url, String name, double radius) {
+    if (url.isNotEmpty) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: Colors.grey[300],
+        child: ClipOval(
+          child: CachedNetworkImage(
+            imageUrl: url,
+            width: radius * 2,
+            height: radius * 2,
+            fit: BoxFit.cover,
+            errorWidget: (_, __, ___) => Text(
+              name.isNotEmpty ? name[0] : 'A',
+              style: GoogleFonts.inter(
+                  fontWeight: FontWeight.w600, color: Colors.grey[700]),
+            ),
+          ),
+        ),
+      );
+    }
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: Colors.grey[300],
+      child: Text(
+        name.isNotEmpty ? name[0] : 'A',
+        style: GoogleFonts.inter(
+            fontWeight: FontWeight.w600, color: Colors.grey[700]),
+      ),
     );
   }
 }

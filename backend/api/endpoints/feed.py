@@ -2,13 +2,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func, delete as sql_delete
 from datetime import datetime, timezone
 from typing import Optional
 import asyncio
 import random
 import logging
 import httpx
+
+from core.utils import to_utc_iso
 
 from core.database import get_db, async_session
 from core.security import get_current_user
@@ -18,7 +20,11 @@ from models.ai_persona import AIPersona
 from models.interaction import Interaction
 from models.story import Story
 from models.comment import Comment
-from services import memory_service
+from models.user_like import UserLike
+from models.saved_post import SavedPost
+from models.story_view import StoryView
+from models.notification import Notification
+from services import memory_service, emotion_engine, anchor_service, embedding_service
 from services.aliyun_ai_service import generate_comment_reply
 
 logger = logging.getLogger(__name__)
@@ -35,6 +41,8 @@ class PostOut(BaseModel):
     caption: str
     like_count: int
     is_close_friend: bool
+    is_liked: bool = False
+    is_saved: bool = False
     created_at: str
 
 
@@ -45,7 +53,7 @@ async def get_posts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch the Ins-style feed of posts."""
+    """Fetch the Ins-style feed of posts with like/save status."""
     result = await db.execute(
         select(Post, AIPersona)
         .join(AIPersona, Post.ai_id == AIPersona.id)
@@ -71,6 +79,27 @@ async def get_posts(
     else:
         intimacy_map = {}
 
+    # Batch-load user's likes and saves
+    post_ids = [post.id for post, _ in rows]
+    liked_ids = set()
+    saved_ids = set()
+    if post_ids:
+        likes_result = await db.execute(
+            select(UserLike.post_id).where(
+                UserLike.user_id == current_user.id,
+                UserLike.post_id.in_(post_ids),
+            )
+        )
+        liked_ids = {row[0] for row in likes_result.all()}
+
+        saves_result = await db.execute(
+            select(SavedPost.post_id).where(
+                SavedPost.user_id == current_user.id,
+                SavedPost.post_id.in_(post_ids),
+            )
+        )
+        saved_ids = {row[0] for row in saves_result.all()}
+
     # Filter: exclude close-friend posts for users with intimacy < 6.0
     filtered = []
     for post, persona in rows:
@@ -90,11 +119,66 @@ async def get_posts(
             caption=post.caption,
             like_count=post.like_count,
             is_close_friend=post.is_close_friend,
-            created_at=post.created_at.isoformat(),
+            is_liked=post.id in liked_ids,
+            is_saved=post.id in saved_ids,
+            created_at=to_utc_iso(post.created_at),
         )
         for post, persona in filtered
     ]
 
+
+# ── Single post detail ─────────────────────────────────────────
+
+@router.get("/posts/{post_id}", response_model=PostOut)
+async def get_post(
+    post_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get a single post by ID."""
+    result = await db.execute(
+        select(Post, AIPersona)
+        .join(AIPersona, Post.ai_id == AIPersona.id)
+        .where(Post.id == post_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Post not found")
+    post, persona = row
+
+    # Check like/save status
+    liked_result = await db.execute(
+        select(UserLike.id).where(
+            UserLike.user_id == current_user.id,
+            UserLike.post_id == post_id,
+        )
+    )
+    is_liked = liked_result.scalar_one_or_none() is not None
+
+    saved_result = await db.execute(
+        select(SavedPost.id).where(
+            SavedPost.user_id == current_user.id,
+            SavedPost.post_id == post_id,
+        )
+    )
+    is_saved = saved_result.scalar_one_or_none() is not None
+
+    return PostOut(
+        id=post.id,
+        ai_id=persona.id,
+        ai_name=persona.name,
+        ai_avatar=persona.avatar_url,
+        media_url=post.media_url,
+        caption=post.caption,
+        like_count=post.like_count,
+        is_close_friend=post.is_close_friend,
+        is_liked=is_liked,
+        is_saved=is_saved,
+        created_at=to_utc_iso(post.created_at),
+    )
+
+
+# ── Like / Unlike (idempotent) ──────────────────────────────────
 
 @router.post("/posts/{post_id}/like")
 async def like_post(
@@ -102,12 +186,24 @@ async def like_post(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Like a post: increment like count and intimacy +1."""
+    """Like a post (idempotent). Returns current like state and count."""
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
+    # Check if already liked
+    existing = await db.execute(
+        select(UserLike).where(
+            UserLike.user_id == current_user.id,
+            UserLike.post_id == post_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return {"liked": True, "like_count": post.like_count}
+
+    # Create like record
+    db.add(UserLike(user_id=current_user.id, post_id=post_id))
     post.like_count += 1
 
     # Update intimacy
@@ -119,18 +215,168 @@ async def like_post(
     )
     interaction = interaction_result.scalar_one_or_none()
     if interaction:
-        interaction.intimacy_score = min(interaction.intimacy_score + 1, 10.0)
+        interaction.intimacy_score = min(interaction.intimacy_score + 0.5, 10.0)
     else:
         interaction = Interaction(
             user_id=current_user.id,
             ai_id=post.ai_id,
-            intimacy_score=1.0,
+            intimacy_score=0.5,
         )
         db.add(interaction)
+
+    # Emotion: apply "like" effect
+    emo = await emotion_engine.get_or_create(db, current_user.id, post.ai_id)
+    emotion_engine.apply_interaction(emo, "like")
 
     await db.commit()
     return {"liked": True, "like_count": post.like_count}
 
+
+@router.delete("/posts/{post_id}/like")
+async def unlike_post(
+    post_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Unlike a post."""
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    post = result.scalar_one_or_none()
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    existing = await db.execute(
+        select(UserLike).where(
+            UserLike.user_id == current_user.id,
+            UserLike.post_id == post_id,
+        )
+    )
+    like = existing.scalar_one_or_none()
+    if not like:
+        return {"liked": False, "like_count": post.like_count}
+
+    await db.delete(like)
+    post.like_count = max(0, post.like_count - 1)
+    await db.commit()
+    return {"liked": False, "like_count": post.like_count}
+
+
+# ── Save / Unsave ───────────────────────────────────────────────
+
+@router.post("/posts/{post_id}/save")
+async def save_post(
+    post_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save/bookmark a post."""
+    result = await db.execute(select(Post).where(Post.id == post_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Post not found")
+
+    existing = await db.execute(
+        select(SavedPost).where(
+            SavedPost.user_id == current_user.id,
+            SavedPost.post_id == post_id,
+        )
+    )
+    if existing.scalar_one_or_none():
+        return {"saved": True}
+
+    db.add(SavedPost(user_id=current_user.id, post_id=post_id))
+    await db.commit()
+    return {"saved": True}
+
+
+@router.delete("/posts/{post_id}/save")
+async def unsave_post(
+    post_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Remove saved post."""
+    existing = await db.execute(
+        select(SavedPost).where(
+            SavedPost.user_id == current_user.id,
+            SavedPost.post_id == post_id,
+        )
+    )
+    saved = existing.scalar_one_or_none()
+    if saved:
+        await db.delete(saved)
+        await db.commit()
+    return {"saved": False}
+
+
+@router.get("/saved", response_model=list[PostOut])
+async def get_saved_posts(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get user's saved posts."""
+    result = await db.execute(
+        select(Post, AIPersona, SavedPost)
+        .join(AIPersona, Post.ai_id == AIPersona.id)
+        .join(SavedPost, SavedPost.post_id == Post.id)
+        .where(SavedPost.user_id == current_user.id)
+        .order_by(SavedPost.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
+    rows = result.all()
+
+    post_ids = [post.id for post, _, _ in rows]
+    liked_ids = set()
+    if post_ids:
+        likes_result = await db.execute(
+            select(UserLike.post_id).where(
+                UserLike.user_id == current_user.id,
+                UserLike.post_id.in_(post_ids),
+            )
+        )
+        liked_ids = {row[0] for row in likes_result.all()}
+
+    return [
+        PostOut(
+            id=post.id,
+            ai_id=post.ai_id,
+            ai_name=persona.name,
+            ai_avatar=persona.avatar_url,
+            media_url=post.media_url,
+            caption=post.caption,
+            like_count=post.like_count,
+            is_close_friend=post.is_close_friend,
+            is_liked=post.id in liked_ids,
+            is_saved=True,
+            created_at=to_utc_iso(post.created_at),
+        )
+        for post, persona, _ in rows
+    ]
+
+
+# ── Story views ─────────────────────────────────────────────────
+
+@router.post("/stories/{story_id}/view")
+async def mark_story_viewed(
+    story_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark a story as viewed by the user."""
+    existing = await db.execute(
+        select(StoryView).where(
+            StoryView.user_id == current_user.id,
+            StoryView.story_id == story_id,
+        )
+    )
+    if not existing.scalar_one_or_none():
+        db.add(StoryView(user_id=current_user.id, story_id=story_id))
+        await db.commit()
+    return {"viewed": True}
+
+
+# ── Image proxy ─────────────────────────────────────────────────
 
 @router.get("/image-proxy")
 async def image_proxy(url: str = Query(...)):
@@ -148,6 +394,8 @@ async def image_proxy(url: str = Query(...)):
         )
 
 
+# ── Stories ─────────────────────────────────────────────────────
+
 class StoryOut(BaseModel):
     id: int
     ai_id: int
@@ -155,6 +403,7 @@ class StoryOut(BaseModel):
     ai_avatar: str
     video_url: str
     caption: str
+    is_viewed: bool = False
     created_at: str
     expires_at: str
 
@@ -164,7 +413,7 @@ async def get_stories(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch unexpired stories with AI persona info."""
+    """Fetch unexpired stories with AI persona info and view status."""
     result = await db.execute(
         select(Story, AIPersona)
         .join(AIPersona, Story.ai_id == AIPersona.id)
@@ -172,8 +421,24 @@ async def get_stories(
     )
     rows = result.all()
 
-    # Filter expired stories in Python (SQLite datetime comparison is unreliable)
     now = datetime.now(timezone.utc)
+    valid_stories = [
+        (story, persona) for story, persona in rows
+        if story.expires_at.astimezone(timezone.utc) > now
+    ]
+
+    # Batch-load view status
+    story_ids = [story.id for story, _ in valid_stories]
+    viewed_ids = set()
+    if story_ids:
+        views_result = await db.execute(
+            select(StoryView.story_id).where(
+                StoryView.user_id == current_user.id,
+                StoryView.story_id.in_(story_ids),
+            )
+        )
+        viewed_ids = {row[0] for row in views_result.all()}
+
     return [
         StoryOut(
             id=story.id,
@@ -182,16 +447,15 @@ async def get_stories(
             ai_avatar=persona.avatar_url,
             video_url=story.video_url,
             caption=story.caption,
-            created_at=story.created_at.isoformat(),
-            expires_at=story.expires_at.isoformat(),
+            is_viewed=story.id in viewed_ids,
+            created_at=to_utc_iso(story.created_at),
+            expires_at=to_utc_iso(story.expires_at),
         )
-        for story, persona in rows
-        if story.expires_at.astimezone(timezone.utc) > now
+        for story, persona in valid_stories
     ]
 
 
-# ── Comment system with delayed AI reply ─────────────────────────────
-
+# ── Comment system ──────────────────────────────────────────────
 
 class CommentIn(BaseModel):
     content: str
@@ -213,16 +477,21 @@ class CommentOut(BaseModel):
 @router.get("/posts/{post_id}/comments", response_model=list[CommentOut])
 async def get_comments(
     post_id: int,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch all comments for a post, ordered by time."""
+    """Fetch paginated comments for a post."""
     result = await db.execute(
-        select(Comment).where(Comment.post_id == post_id).order_by(Comment.created_at.asc())
+        select(Comment)
+        .where(Comment.post_id == post_id)
+        .order_by(Comment.created_at.asc())
+        .offset(offset)
+        .limit(limit)
     )
     comments = result.scalars().all()
 
-    # Batch-load user and AI persona names
     user_ids = [c.user_id for c in comments if c.user_id]
     ai_ids = [c.ai_id for c in comments if c.ai_id]
 
@@ -245,7 +514,7 @@ async def get_comments(
         else:
             user = user_map.get(c.user_id)
             author_name = user.nickname if user else "User"
-            author_avatar = ""
+            author_avatar = user.avatar_url or "" if user else ""
         out.append(CommentOut(
             id=c.id,
             post_id=c.post_id,
@@ -256,7 +525,7 @@ async def get_comments(
             content=c.content,
             author_name=author_name,
             author_avatar=author_avatar,
-            created_at=c.created_at.isoformat(),
+            created_at=to_utc_iso(c.created_at),
         ))
     return out
 
@@ -269,7 +538,6 @@ async def create_comment(
     current_user: User = Depends(get_current_user),
 ):
     """Create a user comment and schedule a delayed AI reply."""
-    # Verify post exists
     post_result = await db.execute(select(Post).where(Post.id == post_id))
     post = post_result.scalar_one_or_none()
     if not post:
@@ -279,7 +547,6 @@ async def create_comment(
     if not content:
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
 
-    # Save user comment
     comment = Comment(
         post_id=post_id,
         user_id=current_user.id,
@@ -290,7 +557,6 @@ async def create_comment(
     )
     db.add(comment)
 
-    # Update intimacy: +0.3 per comment
     interaction_result = await db.execute(
         select(Interaction).where(
             Interaction.user_id == current_user.id,
@@ -308,10 +574,12 @@ async def create_comment(
         )
         db.add(interaction)
 
+    emo = await emotion_engine.get_or_create(db, current_user.id, post.ai_id)
+    emotion_engine.apply_interaction(emo, "comment")
+
     await db.commit()
     await db.refresh(comment)
 
-    # Fire delayed AI reply task (1-5 min random delay)
     asyncio.create_task(
         _delayed_ai_reply(
             comment_id=comment.id,
@@ -333,8 +601,8 @@ async def create_comment(
         reply_to=comment.reply_to,
         content=comment.content,
         author_name=current_user.nickname,
-        author_avatar="",
-        created_at=comment.created_at.isoformat(),
+        author_avatar=current_user.avatar_url or "",
+        created_at=to_utc_iso(comment.created_at),
     )
 
 
@@ -349,19 +617,16 @@ async def _delayed_ai_reply(
 ):
     """Background task: wait 1-5 minutes, then generate and save an AI reply."""
     delay = random.randint(60, 300)
-    print(f"[comment-reply] Scheduled AI reply for comment {comment_id} in {delay}s")
+    logger.info("[comment-reply] Scheduled AI reply for comment %d in %ds", comment_id, delay)
     await asyncio.sleep(delay)
 
     try:
         async with async_session() as db:
-            # Load persona
             persona_result = await db.execute(select(AIPersona).where(AIPersona.id == ai_id))
             persona = persona_result.scalar_one_or_none()
             if not persona:
-                print(f"[comment-reply] AI persona {ai_id} not found, skipping.")
                 return
 
-            # Load intimacy + nickname
             interaction_result = await db.execute(
                 select(Interaction).where(
                     Interaction.user_id == user_id,
@@ -372,18 +637,46 @@ async def _delayed_ai_reply(
             intimacy = interaction.intimacy_score if interaction else 0.0
             special_nickname = (interaction.special_nickname or "") if interaction else ""
 
-            # Load memories
+            comment_embedding = None
+            try:
+                comment_embedding = await embedding_service.get_embedding(user_comment)
+            except Exception:
+                pass
+
             memories = await memory_service.get_contextual_memories(
                 user_id=user_id,
                 ai_id=ai_id,
                 query_text=user_comment,
                 intimacy=intimacy,
                 top_k=3,
+                precomputed_embedding=comment_embedding,
             )
             memories_block = memory_service.format_memories_for_prompt(memories)
 
-            # Generate reply
-            print(f"[comment-reply] Generating reply for comment {comment_id}...")
+            anchor_dirs = ""
+            try:
+                all_anchors = await anchor_service.load_anchors(db, user_id, ai_id)
+                if all_anchors and comment_embedding:
+                    active = await anchor_service.detect_active_anchors(
+                        all_anchors, comment_embedding, user_id, ai_id,
+                    )
+                    sentiment = anchor_service.detect_sentiment(user_comment)
+                    anchor_dirs = anchor_service.build_anchor_directives(
+                        active, all_anchors, sentiment,
+                    )
+                    if active:
+                        asyncio.create_task(
+                            anchor_service.increment_hit_counts_bg(
+                                user_id, ai_id, [a.id for a in active],
+                            )
+                        )
+            except Exception:
+                pass
+
+            emo = await emotion_engine.get_or_create(db, user_id, ai_id)
+            emo_directive = emotion_engine.build_emotion_directive(emo)
+            emo_overrides = emotion_engine.get_param_overrides(emo)
+
             reply_text = await generate_comment_reply(
                 persona_prompt=persona.personality_prompt,
                 intimacy=intimacy,
@@ -392,9 +685,22 @@ async def _delayed_ai_reply(
                 post_caption=post_caption,
                 memories_block=memories_block,
                 special_nickname=special_nickname,
+                emotion_directive=emo_directive,
+                emotion_overrides=emo_overrides,
+                anchor_directives=anchor_dirs,
             )
 
-            # Save AI reply
+            emotion_engine.apply_interaction(emo, "chat")
+
+            asyncio.create_task(
+                anchor_service.extract_and_store_anchors(
+                    user_id=user_id,
+                    ai_id=ai_id,
+                    user_message=user_comment,
+                    ai_reply=reply_text,
+                )
+            )
+
             ai_comment = Comment(
                 post_id=post_id,
                 user_id=None,
@@ -404,10 +710,19 @@ async def _delayed_ai_reply(
                 content=reply_text,
             )
             db.add(ai_comment)
+
+            # Write notification for comment reply
+            notif = Notification(
+                user_id=user_id,
+                type="comment_reply",
+                title=f"{persona.name} replied to your comment",
+                body=reply_text[:200],
+                data_json=f'{{"post_id": {post_id}, "ai_id": {ai_id}}}',
+            )
+            db.add(notif)
+
             await db.commit()
-            print(f"[comment-reply] AI replied to comment {comment_id}: {reply_text[:80]}")
+            logger.info("[comment-reply] AI replied to comment %d", comment_id)
 
     except Exception as e:
-        import traceback
-        print(f"[comment-reply] Failed for comment {comment_id}: {e}")
-        traceback.print_exc()
+        logger.exception("[comment-reply] Failed for comment %d: %s", comment_id, e)

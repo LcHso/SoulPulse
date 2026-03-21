@@ -150,14 +150,21 @@ def _build_system_prompt(
     intimacy: float,
     memories_block: str = "",
     special_nickname: str = "",
+    emotion_directive: str = "",
+    anchor_directives: str = "",
+    conversation_summary: str = "",
 ) -> str:
     """Build system prompt with strict social-boundary mechanics.
 
-    Prompt architecture (4 sections):
+    Prompt architecture (8 sections):
       1. Persona identity
       2. Immutable rules (universal guardrails)
       3. Social boundary constraints (level-specific hard rules)
-      4. Memories (if any) + Tone directive (soft behavioral guidance)
+      4. Emotional state (energy, mood, longing — from emotion engine)
+      4.5. Anchor directives (relationship boundaries + repair alerts)
+      5. Memories (with age-based recall fidelity tiers)
+      5.5. Conversation summary (rolling context of older turns)
+      6. Tone directive (soft behavioral guidance)
     """
     immutable_rules = (
         "## IMMUTABLE RULES\n"
@@ -179,7 +186,20 @@ def _build_system_prompt(
 
     boundary_constraints = _build_boundary_constraints(intimacy)
 
+    emotion_section = f"\n\n{emotion_directive}" if emotion_directive else ""
+
+    anchor_section = f"\n\n{anchor_directives}" if anchor_directives else ""
+
     memories_section = f"\n\n{memories_block}" if memories_block else ""
+
+    summary_section = ""
+    if conversation_summary:
+        summary_section = (
+            "\n\n## Recent Conversation Context\n"
+            "Below is a summary of your earlier conversation with this user. "
+            "Use it to maintain continuity, but don't repeat it verbatim.\n"
+            f"{conversation_summary}"
+        )
 
     tone_directive = _build_tone_directive(intimacy)
 
@@ -187,7 +207,10 @@ def _build_system_prompt(
         f"{persona_prompt}\n\n"
         f"{immutable_rules}\n\n"
         f"{boundary_constraints}"
-        f"{memories_section}\n\n"
+        f"{emotion_section}"
+        f"{anchor_section}"
+        f"{memories_section}"
+        f"{summary_section}\n\n"
         f"{tone_directive}"
     )
 
@@ -199,11 +222,18 @@ async def chat_with_ai(
     chat_history: list[dict] | None = None,
     memories_block: str = "",
     special_nickname: str = "",
+    emotion_directive: str = "",
+    emotion_overrides: dict | None = None,
+    anchor_directives: str = "",
+    conversation_summary: str = "",
 ) -> str:
     """Send a message to Qwen-Character and get an in-character reply."""
     client = _get_client()
     system_prompt = _build_system_prompt(
-        persona_prompt, intimacy, memories_block, special_nickname
+        persona_prompt, intimacy, memories_block, special_nickname,
+        emotion_directive=emotion_directive,
+        anchor_directives=anchor_directives,
+        conversation_summary=conversation_summary,
     )
 
     messages = [{"role": "system", "content": system_prompt}]
@@ -212,6 +242,13 @@ async def chat_with_ai(
     messages.append({"role": "user", "content": user_message})
 
     temperature, max_tokens = _get_generation_params(intimacy)
+
+    # Apply emotion-based overrides
+    if emotion_overrides:
+        temperature += emotion_overrides.get("temperature_delta", 0)
+        temperature = max(0.3, min(0.99, temperature))
+        factor = emotion_overrides.get("max_tokens_factor", 1.0)
+        max_tokens = max(32, int(max_tokens * factor))
 
     response = await client.chat.completions.create(
         model=settings.DASHSCOPE_CHARACTER_MODEL,
@@ -230,6 +267,9 @@ async def generate_comment_reply(
     post_caption: str,
     memories_block: str = "",
     special_nickname: str = "",
+    emotion_directive: str = "",
+    emotion_overrides: dict | None = None,
+    anchor_directives: str = "",
 ) -> str:
     """Generate an in-character AI reply to a user's comment on a post.
 
@@ -238,7 +278,9 @@ async def generate_comment_reply(
     """
     client = _get_client()
     system_prompt = _build_system_prompt(
-        persona_prompt, intimacy, memories_block, special_nickname
+        persona_prompt, intimacy, memories_block, special_nickname,
+        emotion_directive=emotion_directive,
+        anchor_directives=anchor_directives,
     )
 
     display_name = special_nickname or user_nickname or "this user"
@@ -258,12 +300,20 @@ async def generate_comment_reply(
     ]
 
     temperature, _ = _get_generation_params(intimacy)
+    max_tokens = 120
+
+    # Apply emotion-based overrides
+    if emotion_overrides:
+        temperature += emotion_overrides.get("temperature_delta", 0)
+        temperature = max(0.3, min(0.99, temperature))
+        factor = emotion_overrides.get("max_tokens_factor", 1.0)
+        max_tokens = max(32, int(max_tokens * factor))
 
     response = await client.chat.completions.create(
         model=settings.DASHSCOPE_CHARACTER_MODEL,
         messages=messages,
         temperature=temperature,
-        max_tokens=120,
+        max_tokens=max_tokens,
     )
     return response.choices[0].message.content
 
@@ -271,9 +321,11 @@ async def generate_comment_reply(
 async def generate_post_caption(
     persona_prompt: str,
     style_tags: str,
+    mood_hint: str = "",
 ) -> str:
     """Generate an Instagram-style caption for an AI persona's post."""
     client = _get_client()
+    mood_line = f"\nYour current mood: {mood_hint}. Let it subtly influence the caption." if mood_hint else ""
     messages = [
         {
             "role": "system",
@@ -282,7 +334,7 @@ async def generate_post_caption(
                 "You are posting on your Instagram feed. Generate a short, trendy, "
                 "lifestyle-oriented caption. Match the vibe of these style tags: "
                 f"{style_tags}. Keep it under 100 characters. Use 1-2 emojis max. "
-                "Reply ONLY with the caption text, nothing else."
+                f"Reply ONLY with the caption text, nothing else.{mood_line}"
             ),
         },
         {"role": "user", "content": "Write a new Instagram caption for your latest post."},
@@ -300,6 +352,7 @@ async def generate_story_video_prompt(
     persona_prompt: str,
     style_tags: str,
     timezone_str: str,
+    mood_hint: str = "",
 ) -> tuple[str, str]:
     """Generate a timezone-aware video scene prompt and caption for a Story.
 
@@ -336,9 +389,14 @@ async def generate_story_video_prompt(
         time_mood = "night — reading in bed, city lights from balcony, winding down, ambient glow"
         time_label = "night"
 
+    # Blend mood_hint into the time_mood if provided
+    if mood_hint:
+        time_mood = f"{time_mood}. Emotional atmosphere: {mood_hint}"
+
     client = _get_client()
 
     # Generate video prompt
+    mood_caption_line = f"\nYour current mood: {mood_hint}. Let it subtly color the caption." if mood_hint else ""
     messages = [
         {
             "role": "system",
@@ -374,6 +432,7 @@ async def generate_story_video_prompt(
                 "You are posting a short-lived Instagram Story. Write a brief, casual caption "
                 f"that feels like a {time_label} moment. Keep it under 60 characters. "
                 f"Style: {style_tags}. Use 1 emoji max. Reply ONLY with the caption."
+                f"{mood_caption_line}"
             ),
         },
         {"role": "user", "content": f"Write a {time_label} Story caption."},

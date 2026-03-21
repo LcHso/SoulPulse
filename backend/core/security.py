@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -53,3 +54,30 @@ async def get_current_user(
     if user is None:
         raise credentials_exception
     return user
+
+
+async def authenticate_ws_token(token: str, db: AsyncSession) -> Optional["User"]:
+    """Authenticate a JWT token for WebSocket connections.
+
+    Unlike get_current_user(), this doesn't use Depends() and returns None
+    on failure instead of raising an exception. Suitable for WebSocket
+    handshake authentication where we need manual control.
+
+    Returns the User if valid, None if invalid/expired.
+    """
+    from models.user import User
+
+    if not token:
+        return None
+
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        user_id = int(user_id)
+    except (JWTError, ValueError):
+        return None
+
+    result = await db.execute(select(User).where(User.id == user_id))
+    return result.scalar_one_or_none()

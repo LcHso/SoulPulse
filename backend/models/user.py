@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Optional
 
 from sqlalchemy import String, Integer, Float, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -13,6 +14,8 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     nickname: Mapped[str] = mapped_column(String(100), default="User")
+    avatar_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True, default=None)
+    gender: Mapped[str] = mapped_column(String(20), default="not_specified")
     orientation_preference: Mapped[str] = mapped_column(String(50), default="male")
     gem_balance: Mapped[int] = mapped_column(Integer, default=100)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

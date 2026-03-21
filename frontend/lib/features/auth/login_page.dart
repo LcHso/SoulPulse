@@ -1,60 +1,54 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
-import '../../core/api/api_client.dart';
-import '../feed/feed_page.dart';
+import '../../core/providers/auth_provider.dart';
 
-class LoginPage extends StatefulWidget {
+class LoginPage extends ConsumerStatefulWidget {
   const LoginPage({super.key});
 
   @override
-  State<LoginPage> createState() => _LoginPageState();
+  ConsumerState<LoginPage> createState() => _LoginPageState();
 }
 
-class _LoginPageState extends State<LoginPage> {
+class _LoginPageState extends ConsumerState<LoginPage> {
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   final _nicknameCtrl = TextEditingController();
   bool _isRegister = false;
-  bool _loading = false;
   String? _error;
+  String _gender = 'not_specified';
+  String _orientation = 'male';
 
   Future<void> _submit() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+    setState(() => _error = null);
 
     try {
       if (_isRegister) {
-        await ApiClient.post('/api/auth/register', {
-          'email': _emailCtrl.text.trim(),
-          'password': _passwordCtrl.text,
-          'nickname': _nicknameCtrl.text.trim().isEmpty
-              ? 'User'
-              : _nicknameCtrl.text.trim(),
-        });
-        // After register, auto login
+        await ref.read(authProvider.notifier).register(
+              _emailCtrl.text.trim(),
+              _passwordCtrl.text,
+              _nicknameCtrl.text.trim().isEmpty
+                  ? 'User'
+                  : _nicknameCtrl.text.trim(),
+              gender: _gender,
+              orientation: _orientation,
+            );
+      } else {
+        await ref.read(authProvider.notifier).login(
+              _emailCtrl.text.trim(),
+              _passwordCtrl.text,
+            );
       }
-
-      final result = await ApiClient.postForm('/api/auth/login', {
-        'username': _emailCtrl.text.trim(),
-        'password': _passwordCtrl.text,
-      });
-      await ApiClient.saveToken(result['access_token']);
-
-      if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const FeedPage()),
-      );
+      if (mounted) context.go('/feed');
     } catch (e) {
       setState(() => _error = e.toString().replaceAll('Exception: ', ''));
-    } finally {
-      if (mounted) setState(() => _loading = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final authState = ref.watch(authProvider);
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
@@ -66,7 +60,6 @@ class _LoginPageState extends State<LoginPage> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 const SizedBox(height: 40),
-                // Logo
                 Text(
                   'SoulPulse',
                   style: GoogleFonts.inter(
@@ -84,33 +77,57 @@ class _LoginPageState extends State<LoginPage> {
                   ),
                 ),
                 const SizedBox(height: 40),
-
-                // Email
                 TextField(
                   controller: _emailCtrl,
                   keyboardType: TextInputType.emailAddress,
                   decoration: const InputDecoration(hintText: 'Email'),
                 ),
                 const SizedBox(height: 12),
-
-                // Password
                 TextField(
                   controller: _passwordCtrl,
                   obscureText: true,
                   decoration: const InputDecoration(hintText: 'Password'),
                 ),
-
-                // Nickname (register only)
                 if (_isRegister) ...[
                   const SizedBox(height: 12),
                   TextField(
                     controller: _nicknameCtrl,
                     decoration: const InputDecoration(hintText: 'Nickname'),
                   ),
+                  const SizedBox(height: 12),
+                  // Gender selection
+                  DropdownButtonFormField<String>(
+                    value: _gender,
+                    decoration: const InputDecoration(labelText: 'Gender'),
+                    items: const [
+                      DropdownMenuItem(
+                          value: 'not_specified',
+                          child: Text('Prefer not to say')),
+                      DropdownMenuItem(value: 'male', child: Text('Male')),
+                      DropdownMenuItem(value: 'female', child: Text('Female')),
+                      DropdownMenuItem(
+                          value: 'non_binary', child: Text('Non-binary')),
+                    ],
+                    onChanged: (v) => setState(() => _gender = v!),
+                  ),
+                  const SizedBox(height: 12),
+                  // Orientation
+                  DropdownButtonFormField<String>(
+                    value: _orientation,
+                    decoration:
+                        const InputDecoration(labelText: 'Interested in'),
+                    items: const [
+                      DropdownMenuItem(
+                          value: 'male', child: Text('Male characters')),
+                      DropdownMenuItem(
+                          value: 'female', child: Text('Female characters')),
+                      DropdownMenuItem(
+                          value: 'both', child: Text('All characters')),
+                    ],
+                    onChanged: (v) => setState(() => _orientation = v!),
+                  ),
                 ],
                 const SizedBox(height: 20),
-
-                // Error
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
@@ -119,11 +136,9 @@ class _LoginPageState extends State<LoginPage> {
                       style: const TextStyle(color: Colors.red, fontSize: 13),
                     ),
                   ),
-
-                // Submit button
                 ElevatedButton(
-                  onPressed: _loading ? null : _submit,
-                  child: _loading
+                  onPressed: authState.isLoading ? null : _submit,
+                  child: authState.isLoading
                       ? const SizedBox(
                           height: 20,
                           width: 20,
@@ -132,8 +147,6 @@ class _LoginPageState extends State<LoginPage> {
                       : Text(_isRegister ? 'Sign Up' : 'Log In'),
                 ),
                 const SizedBox(height: 16),
-
-                // Toggle
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [

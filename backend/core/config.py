@@ -37,5 +37,8 @@ class Settings(BaseModel):
     OSS_BUCKET_NAME: str = _env("OSS_BUCKET_NAME", "soulpulse-media")
     OSS_ENDPOINT: str = _env("OSS_ENDPOINT", "https://oss-cn-hangzhou.aliyuncs.com")
 
+    # CORS allowed origins (comma-separated, "*" for dev)
+    ALLOWED_ORIGINS: str = _env("ALLOWED_ORIGINS", "*")
+
 
 settings = Settings()

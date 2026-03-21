@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/api/api_client.dart';
 
@@ -26,13 +27,11 @@ class _StoryBarState extends State<StoryBar> {
       final stories = await ApiClient.getList('/api/feed/stories');
       if (mounted) setState(() => _stories = stories);
     } catch (_) {
-      // Silently fail — story bar is non-critical
     } finally {
       if (mounted) setState(() => _loading = false);
     }
   }
 
-  /// Group stories by ai_id, keeping the latest story per persona.
   List<Map<String, dynamic>> _groupByPersona() {
     final Map<int, Map<String, dynamic>> grouped = {};
     for (final story in _stories) {
@@ -43,9 +42,13 @@ class _StoryBarState extends State<StoryBar> {
           'ai_name': story['ai_name'] as String,
           'ai_avatar': story['ai_avatar'] as String? ?? '',
           'stories': <dynamic>[],
+          'has_unviewed': false,
         };
       }
       (grouped[aiId]!['stories'] as List).add(story);
+      if (story['is_viewed'] != true) {
+        grouped[aiId]!['has_unviewed'] = true;
+      }
     }
     return grouped.values.toList();
   }
@@ -54,10 +57,7 @@ class _StoryBarState extends State<StoryBar> {
   Widget build(BuildContext context) {
     final groups = _groupByPersona();
 
-    // Show nothing if no stories and done loading
-    if (!_loading && groups.isEmpty) {
-      return const SizedBox.shrink();
-    }
+    if (!_loading && groups.isEmpty) return const SizedBox.shrink();
 
     return Container(
       height: 110,
@@ -70,7 +70,11 @@ class _StoryBarState extends State<StoryBar> {
         ),
       ),
       child: _loading
-          ? const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))
+          ? const Center(
+              child: SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2)))
           : ListView.builder(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -80,6 +84,8 @@ class _StoryBarState extends State<StoryBar> {
                 final name = group['ai_name'] as String;
                 final aiId = group['ai_id'] as int;
                 final stories = group['stories'] as List;
+                final avatarUrl = group['ai_avatar'] as String;
+                final hasUnviewed = group['has_unviewed'] == true;
 
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -88,20 +94,25 @@ class _StoryBarState extends State<StoryBar> {
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        // Gradient ring around avatar
                         Container(
                           padding: const EdgeInsets.all(3),
-                          decoration: const BoxDecoration(
+                          decoration: BoxDecoration(
                             shape: BoxShape.circle,
-                            gradient: LinearGradient(
-                              colors: [
-                                Color(0xFFF58529),
-                                Color(0xFFDD2A7B),
-                                Color(0xFF8134AF),
-                              ],
-                              begin: Alignment.topRight,
-                              end: Alignment.bottomLeft,
-                            ),
+                            gradient: hasUnviewed
+                                ? const LinearGradient(
+                                    colors: [
+                                      Color(0xFFF58529),
+                                      Color(0xFFDD2A7B),
+                                      Color(0xFF8134AF),
+                                    ],
+                                    begin: Alignment.topRight,
+                                    end: Alignment.bottomLeft,
+                                  )
+                                : null,
+                            border: hasUnviewed
+                                ? null
+                                : Border.all(
+                                    color: Colors.grey[400]!, width: 1.5),
                           ),
                           child: Container(
                             padding: const EdgeInsets.all(2),
@@ -109,18 +120,39 @@ class _StoryBarState extends State<StoryBar> {
                               shape: BoxShape.circle,
                               color: Theme.of(context).scaffoldBackgroundColor,
                             ),
-                            child: CircleAvatar(
-                              radius: 30,
-                              backgroundColor: Colors.grey[300],
-                              child: Text(
-                                name.isNotEmpty ? name[0] : 'A',
-                                style: GoogleFonts.inter(
-                                  fontSize: 22,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.grey[700],
-                                ),
-                              ),
-                            ),
+                            child: avatarUrl.isNotEmpty
+                                ? CircleAvatar(
+                                    radius: 30,
+                                    backgroundColor: Colors.grey[300],
+                                    child: ClipOval(
+                                      child: CachedNetworkImage(
+                                        imageUrl: avatarUrl,
+                                        width: 60,
+                                        height: 60,
+                                        fit: BoxFit.cover,
+                                        errorWidget: (_, __, ___) => Text(
+                                          name.isNotEmpty ? name[0] : 'A',
+                                          style: GoogleFonts.inter(
+                                            fontSize: 22,
+                                            fontWeight: FontWeight.w600,
+                                            color: Colors.grey[700],
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  )
+                                : CircleAvatar(
+                                    radius: 30,
+                                    backgroundColor: Colors.grey[300],
+                                    child: Text(
+                                      name.isNotEmpty ? name[0] : 'A',
+                                      style: GoogleFonts.inter(
+                                        fontSize: 22,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.grey[700],
+                                      ),
+                                    ),
+                                  ),
                           ),
                         ),
                         const SizedBox(height: 4),

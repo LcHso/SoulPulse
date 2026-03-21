@@ -1,155 +1,282 @@
 import 'package:flutter/material.dart';
-import '../../core/api/api_client.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shimmer/shimmer.dart';
+import '../../core/providers/feed_provider.dart';
+import '../../core/providers/notification_provider.dart';
 import 'widgets/story_bar.dart';
 import 'widgets/post_card.dart';
-import 'story_player_page.dart';
-import '../chat/chat_page.dart';
-import '../auth/login_page.dart';
-import '../profile/ai_profile_page.dart';
-import '../profile/post_detail_page.dart';
 
-class FeedPage extends StatefulWidget {
+class FeedPage extends ConsumerStatefulWidget {
   const FeedPage({super.key});
 
   @override
-  State<FeedPage> createState() => _FeedPageState();
+  ConsumerState<FeedPage> createState() => _FeedPageState();
 }
 
-class _FeedPageState extends State<FeedPage> {
-  List<dynamic> _posts = [];
-  bool _loading = true;
+class _FeedPageState extends ConsumerState<FeedPage> {
+  final _scrollCtrl = ScrollController();
 
   @override
   void initState() {
     super.initState();
-    _loadPosts();
+    _scrollCtrl.addListener(_onScroll);
+    Future.microtask(
+        () => ref.read(feedProvider.notifier).loadPosts(refresh: true));
   }
 
-  Future<void> _loadPosts() async {
-    setState(() => _loading = true);
-    try {
-      final posts = await ApiClient.getList('/api/feed/posts');
-      setState(() => _posts = posts);
-    } catch (e) {
-      // Show error in a snackbar
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Failed to load feed: $e')),
-        );
+  @override
+  void dispose() {
+    _scrollCtrl.removeListener(_onScroll);
+    _scrollCtrl.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (_scrollCtrl.position.pixels >=
+        _scrollCtrl.position.maxScrollExtent - 300) {
+      final state = ref.read(feedProvider);
+      if (!state.isLoading && state.hasMore) {
+        ref.read(feedProvider.notifier).loadPosts();
       }
-    } finally {
-      if (mounted) setState(() => _loading = false);
     }
   }
 
-  Future<void> _likePost(int postId) async {
-    try {
-      await ApiClient.post('/api/feed/posts/$postId/like', {});
-      _loadPosts();
-    } catch (_) {}
-  }
-
   void _openChat(Map<String, dynamic> post) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ChatPage(
-          aiId: post['ai_id'],
-          aiName: post['ai_name'],
-          postContext: post['caption'],
-        ),
-      ),
-    );
+    final aiId = post['ai_id'];
+    final aiName = Uri.encodeComponent(post['ai_name'] ?? 'AI');
+    final caption = post['caption'] as String?;
+    var path = '/chat/$aiId?name=$aiName';
+    if (caption != null && caption.isNotEmpty) {
+      path += '&context=${Uri.encodeComponent(caption)}';
+    }
+    context.push(path);
   }
 
   void _openProfile(Map<String, dynamic> post) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => AIProfilePage(
-          aiId: post['ai_id'],
-          aiName: post['ai_name'] ?? 'AI',
-        ),
-      ),
-    );
+    final aiId = post['ai_id'];
+    final aiName = Uri.encodeComponent(post['ai_name'] ?? 'AI');
+    context.push('/ai/$aiId?name=$aiName');
   }
 
   void _openStoryPlayer(List<dynamic> stories, int aiId) {
     if (stories.isEmpty) return;
     final aiName = stories.first['ai_name'] as String? ?? 'AI';
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => StoryPlayerPage(
-          stories: stories,
-          aiName: aiName,
-          aiId: aiId,
-        ),
-      ),
-    );
+    context.push('/story', extra: {
+      'stories': stories,
+      'aiName': aiName,
+      'aiId': aiId,
+    });
   }
 
-  void _openPostDetail(Map<String, dynamic> post) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => PostDetailPage(
-          post: post,
-          aiName: post['ai_name'] ?? 'AI',
-          aiAvatar: post['ai_avatar'] ?? '',
-        ),
-      ),
-    );
+  void _openPostDetail(Map<String, dynamic> post) async {
+    await context.push('/post-detail', extra: {
+      'post': post,
+      'aiName': post['ai_name'] ?? 'AI',
+      'aiAvatar': post['ai_avatar'] ?? '',
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    final feedState = ref.watch(feedProvider);
+    final notifState = ref.watch(notificationProvider);
+    final notifUnread = notifState.unreadCount;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('SoulPulse'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.chat_bubble_outline),
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => const ChatPage(
-                    aiId: 1,
-                    aiName: 'Ethan',
-                  ),
-                ),
-              );
-            },
-          ),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: () async {
-              await ApiClient.clearToken();
-              if (!context.mounted) return;
-              Navigator.of(context).pushReplacement(
-                MaterialPageRoute(builder: (_) => const LoginPage()),
-              );
-            },
+            icon: Badge(
+              isLabelVisible: notifUnread > 0,
+              label: Text('$notifUnread'),
+              child: const Icon(Icons.notifications_none),
+            ),
+            onPressed: () => context.push('/notifications'),
           ),
         ],
       ),
       body: RefreshIndicator(
-        onRefresh: _loadPosts,
-        child: _loading && _posts.isEmpty
-            ? const Center(child: CircularProgressIndicator())
-            : ListView.builder(
-                itemCount: _posts.length + 1, // +1 for story bar
-                itemBuilder: (context, index) {
-                  if (index == 0) {
-                    return StoryBar(onStoryTap: _openStoryPlayer);
-                  }
-                  final post = _posts[index - 1];
-                  return PostCard(
-                    post: post,
-                    onDoubleTap: () => _likePost(post['id']),
-                    onDM: () => _openChat(post),
-                    onProfileTap: () => _openProfile(post),
-                    onComment: () => _openPostDetail(post),
-                  );
-                },
-              ),
+        onRefresh: () async {
+          await ref.read(feedProvider.notifier).loadPosts(refresh: true);
+          ref.invalidate(storiesProvider);
+        },
+        child: feedState.isLoading && feedState.posts.isEmpty
+            ? _buildShimmerLoading()
+            : feedState.error != null && feedState.posts.isEmpty
+                ? _buildErrorState(feedState.error!)
+                : feedState.posts.isEmpty
+                    ? _buildEmptyState()
+                    : ListView.builder(
+                        controller: _scrollCtrl,
+                        itemCount: feedState.posts.length +
+                            2, // +1 story bar, +1 loading
+                        itemBuilder: (context, index) {
+                          if (index == 0) {
+                            return StoryBar(onStoryTap: _openStoryPlayer);
+                          }
+                          if (index == feedState.posts.length + 1) {
+                            // Bottom loading indicator
+                            if (feedState.isLoading) {
+                              return const Padding(
+                                padding: EdgeInsets.all(16),
+                                child: Center(
+                                    child: CircularProgressIndicator(
+                                        strokeWidth: 2)),
+                              );
+                            }
+                            if (!feedState.hasMore) {
+                              return Padding(
+                                padding: const EdgeInsets.all(24),
+                                child: Center(
+                                  child: Text(
+                                    'You\'re all caught up',
+                                    style: TextStyle(
+                                        color: Colors.grey[500], fontSize: 13),
+                                  ),
+                                ),
+                              );
+                            }
+                            return const SizedBox.shrink();
+                          }
+                          final post = feedState.posts[index - 1];
+                          return PostCard(
+                            post: post,
+                            onLike: () => ref
+                                .read(feedProvider.notifier)
+                                .toggleLike(post['id']),
+                            onSave: () => ref
+                                .read(feedProvider.notifier)
+                                .toggleSave(post['id']),
+                            onDM: () => _openChat(post),
+                            onProfileTap: () => _openProfile(post),
+                            onComment: () => _openPostDetail(post),
+                          );
+                        },
+                      ),
       ),
+    );
+  }
+
+  Widget _buildShimmerLoading() {
+    return ListView.builder(
+      itemCount: 4,
+      itemBuilder: (context, index) {
+        if (index == 0) {
+          return _buildStoryBarShimmer();
+        }
+        return _buildPostShimmer();
+      },
+    );
+  }
+
+  Widget _buildStoryBarShimmer() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Shimmer.fromColors(
+      baseColor: isDark ? Colors.grey[800]! : Colors.grey[300]!,
+      highlightColor: isDark ? Colors.grey[700]! : Colors.grey[100]!,
+      child: Container(
+        height: 110,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: List.generate(
+              5,
+              (_) => Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const CircleAvatar(radius: 30),
+                        const SizedBox(height: 4),
+                        Container(width: 40, height: 10, color: Colors.white),
+                      ],
+                    ),
+                  )),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPostShimmer() {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Shimmer.fromColors(
+      baseColor: isDark ? Colors.grey[800]! : Colors.grey[300]!,
+      highlightColor: isDark ? Colors.grey[700]! : Colors.grey[100]!,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            child: Row(
+              children: [
+                const CircleAvatar(radius: 16),
+                const SizedBox(width: 10),
+                Container(width: 80, height: 12, color: Colors.white),
+              ],
+            ),
+          ),
+          AspectRatio(
+            aspectRatio: 4 / 5,
+            child: Container(color: Colors.white),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(width: 60, height: 12, color: Colors.white),
+                const SizedBox(height: 8),
+                Container(
+                    width: double.infinity, height: 10, color: Colors.white),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildErrorState(String error) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.error_outline, size: 48, color: Colors.grey[400]),
+          const SizedBox(height: 16),
+          Text('Failed to load feed',
+              style: TextStyle(color: Colors.grey[500])),
+          const SizedBox(height: 8),
+          TextButton(
+            onPressed: () =>
+                ref.read(feedProvider.notifier).loadPosts(refresh: true),
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return ListView(
+      children: [
+        StoryBar(onStoryTap: _openStoryPlayer),
+        const SizedBox(height: 80),
+        Center(
+          child: Column(
+            children: [
+              Icon(Icons.photo_library_outlined,
+                  size: 64, color: Colors.grey[300]),
+              const SizedBox(height: 16),
+              Text('No posts yet',
+                  style: TextStyle(fontSize: 16, color: Colors.grey[500])),
+              const SizedBox(height: 8),
+              Text('Discover AI personas and start connecting!',
+                  style: TextStyle(fontSize: 13, color: Colors.grey[400])),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:timeago/timeago.dart' as timeago;
 import '../../core/api/api_client.dart';
-import '../../core/services/notification_service.dart';
-import '../chat/chat_page.dart';
 import '../feed/widgets/heart_animation.dart';
 
 class PostDetailPage extends StatefulWidget {
@@ -25,6 +27,7 @@ class PostDetailPage extends StatefulWidget {
 class _PostDetailPageState extends State<PostDetailPage> {
   bool _showHeart = false;
   bool _liked = false;
+  bool _saved = false;
   late int _likeCount;
 
   final _commentController = TextEditingController();
@@ -39,8 +42,9 @@ class _PostDetailPageState extends State<PostDetailPage> {
   void initState() {
     super.initState();
     _likeCount = widget.post['like_count'] as int? ?? 0;
+    _liked = widget.post['is_liked'] == true;
+    _saved = widget.post['is_saved'] == true;
     _loadComments();
-    // Poll for new comments (AI replies) every 30 seconds
     _pollTimer =
         Timer.periodic(const Duration(seconds: 30), (_) => _loadComments());
   }
@@ -54,29 +58,50 @@ class _PostDetailPageState extends State<PostDetailPage> {
 
   Future<void> _loadComments() async {
     try {
-      final comments =
-          await ApiClient.getList('/api/feed/posts/$_postId/comments');
+      final comments = await ApiClient.getList(
+          '/api/feed/posts/$_postId/comments',
+          useCache: false);
       if (mounted) {
-        final oldCount = _comments.length;
         setState(() {
-          _comments = comments;
+          _comments = _sortCommentsWithReplies(comments);
           _loadingComments = false;
         });
-        // If new AI reply appeared, show notification
-        if (oldCount > 0 && comments.length > oldCount) {
-          final latest = comments.last as Map<String, dynamic>;
-          if (latest['is_ai_reply'] == true && mounted) {
-            NotificationService.instance.show(
-              context,
-              title: '${widget.aiName} replied to your comment',
-              body: '${latest['content']}',
-            );
-          }
-        }
       }
     } catch (_) {
       if (mounted) setState(() => _loadingComments = false);
     }
+  }
+
+  /// Sort comments so that AI replies appear directly after their parent comment.
+  List<dynamic> _sortCommentsWithReplies(List<dynamic> comments) {
+    final roots = <Map<String, dynamic>>[];
+    final replyMap = <int, List<Map<String, dynamic>>>{};
+
+    for (final c in comments) {
+      final comment = c as Map<String, dynamic>;
+      final replyTo = comment['reply_to'] as int?;
+      if (replyTo != null) {
+        replyMap.putIfAbsent(replyTo, () => []).add(comment);
+      } else {
+        roots.add(comment);
+      }
+    }
+
+    final sorted = <Map<String, dynamic>>[];
+    for (final root in roots) {
+      sorted.add(root);
+      final replies = replyMap[root['id'] as int?] ?? [];
+      sorted.addAll(replies);
+    }
+
+    // Add any orphaned replies (parent not in current page)
+    for (final entry in replyMap.entries) {
+      if (!roots.any((r) => r['id'] == entry.key)) {
+        sorted.addAll(entry.value);
+      }
+    }
+
+    return sorted;
   }
 
   Future<void> _submitComment() async {
@@ -85,10 +110,15 @@ class _PostDetailPageState extends State<PostDetailPage> {
 
     setState(() => _submitting = true);
     try {
-      await ApiClient.post(
+      final newComment = await ApiClient.post(
           '/api/feed/posts/$_postId/comments', {'content': text});
       _commentController.clear();
-      await _loadComments();
+      // Optimistically add the new comment immediately
+      if (mounted) {
+        setState(() {
+          _comments = _sortCommentsWithReplies([..._comments, newComment]);
+        });
+      }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -101,32 +131,71 @@ class _PostDetailPageState extends State<PostDetailPage> {
   }
 
   Future<void> _handleLike() async {
+    final wasLiked = _liked;
     setState(() {
       _showHeart = true;
-      _liked = true;
+      _liked = !wasLiked;
+      _likeCount += wasLiked ? -1 : 1;
     });
+    HapticFeedback.lightImpact();
     Future.delayed(const Duration(milliseconds: 800), () {
       if (mounted) setState(() => _showHeart = false);
     });
     try {
-      final result =
-          await ApiClient.post('/api/feed/posts/${widget.post['id']}/like', {});
+      if (wasLiked) {
+        await ApiClient.delete('/api/feed/posts/$_postId/like');
+      } else {
+        await ApiClient.post('/api/feed/posts/$_postId/like', {});
+      }
+    } catch (_) {
+      // Revert
       setState(() {
-        _likeCount = result['like_count'] as int? ?? _likeCount + 1;
+        _liked = wasLiked;
+        _likeCount += wasLiked ? 1 : -1;
       });
-    } catch (_) {}
+    }
+  }
+
+  Future<void> _handleSave() async {
+    final wasSaved = _saved;
+    setState(() => _saved = !wasSaved);
+    HapticFeedback.lightImpact();
+    try {
+      if (wasSaved) {
+        await ApiClient.delete('/api/feed/posts/$_postId/save');
+      } else {
+        await ApiClient.post('/api/feed/posts/$_postId/save', {});
+      }
+    } catch (_) {
+      setState(() => _saved = wasSaved);
+    }
   }
 
   void _openChat() {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => ChatPage(
-          aiId: widget.post['ai_id'] as int? ?? 1,
-          aiName: widget.aiName,
-          postContext: widget.post['caption'] as String?,
-        ),
-      ),
-    );
+    final aiId = widget.post['ai_id'] as int? ?? 1;
+    final aiName = Uri.encodeComponent(widget.aiName);
+    final caption = widget.post['caption'] as String?;
+    var path = '/chat/$aiId?name=$aiName';
+    if (caption != null && caption.isNotEmpty) {
+      path += '&context=${Uri.encodeComponent(caption)}';
+    }
+    context.push(path);
+  }
+
+  void _openProfile() {
+    final aiId = widget.post['ai_id'] as int? ?? 1;
+    final aiName = Uri.encodeComponent(widget.aiName);
+    context.push('/ai/$aiId?name=$aiName');
+  }
+
+  String _formatTime(String? isoString) {
+    if (isoString == null || isoString.isEmpty) return '';
+    try {
+      final dt = DateTime.parse(isoString).toLocal();
+      return timeago.format(dt);
+    } catch (_) {
+      return '';
+    }
   }
 
   @override
@@ -134,51 +203,50 @@ class _PostDetailPageState extends State<PostDetailPage> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final mediaUrl = widget.post['media_url'] as String? ?? '';
     final caption = widget.post['caption'] as String? ?? '';
+    final createdAt = widget.post['created_at'] as String?;
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(
-          'Post',
-          style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 18),
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => context.pop(),
         ),
+        title: Text('Post',
+            style:
+                GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 18)),
       ),
       body: Column(
         children: [
           Expanded(
             child: ListView(
               children: [
-                // Header: avatar + name
+                // Header
                 Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  child: Row(
-                    children: [
-                      CircleAvatar(
-                        radius: 16,
-                        backgroundColor: Colors.grey[300],
-                        child: Text(
-                          widget.aiName.isNotEmpty ? widget.aiName[0] : 'A',
-                          style: GoogleFonts.inter(
-                            fontWeight: FontWeight.w600,
-                            color: Colors.grey[700],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        widget.aiName,
-                        style: GoogleFonts.inter(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 14,
-                        ),
-                      ),
-                    ],
+                  child: GestureDetector(
+                    onTap: _openProfile,
+                    child: Row(
+                      children: [
+                        _buildAvatar(widget.aiAvatar, widget.aiName, 16),
+                        const SizedBox(width: 10),
+                        Text(widget.aiName,
+                            style: GoogleFonts.inter(
+                                fontWeight: FontWeight.w600, fontSize: 14)),
+                      ],
+                    ),
                   ),
                 ),
 
-                // Image with double-tap like
+                // Image with double-tap
                 GestureDetector(
-                  onDoubleTap: _handleLike,
+                  onDoubleTap: () {
+                    if (!_liked) _handleLike();
+                    setState(() => _showHeart = true);
+                    Future.delayed(const Duration(milliseconds: 800), () {
+                      if (mounted) setState(() => _showHeart = false);
+                    });
+                  },
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
@@ -190,25 +258,15 @@ class _PostDetailPageState extends State<PostDetailPage> {
                               ? const Color(0xFF1A1A1A)
                               : const Color(0xFFF0F0F0),
                           child: mediaUrl.isNotEmpty
-                              ? Image.network(
-                                  ApiClient.proxyImageUrl(mediaUrl),
+                              ? CachedNetworkImage(
+                                  imageUrl: mediaUrl,
                                   fit: BoxFit.cover,
-                                  loadingBuilder: (context, child, progress) {
-                                    if (progress == null) return child;
-                                    return Center(
-                                      child: CircularProgressIndicator(
-                                        value: progress.expectedTotalBytes !=
-                                                null
-                                            ? progress.cumulativeBytesLoaded /
-                                                progress.expectedTotalBytes!
-                                            : null,
+                                  placeholder: (_, __) => Center(
+                                    child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        color: Colors.grey[400],
-                                      ),
-                                    );
-                                  },
-                                  errorBuilder: (context, error, stack) =>
-                                      Center(
+                                        color: Colors.grey[400]),
+                                  ),
+                                  errorWidget: (_, __, ___) => Center(
                                     child: Icon(Icons.broken_image_outlined,
                                         size: 48, color: Colors.grey[400]),
                                   ),
@@ -231,10 +289,7 @@ class _PostDetailPageState extends State<PostDetailPage> {
                   child: Row(
                     children: [
                       GestureDetector(
-                        onTap: () {
-                          setState(() => _liked = !_liked);
-                          if (_liked) _handleLike();
-                        },
+                        onTap: _handleLike,
                         child: Icon(
                           _liked ? Icons.favorite : Icons.favorite_border,
                           color: _liked ? const Color(0xFFED4956) : null,
@@ -242,15 +297,22 @@ class _PostDetailPageState extends State<PostDetailPage> {
                         ),
                       ),
                       const SizedBox(width: 16),
-                      GestureDetector(
-                        onTap: () =>
-                            FocusScope.of(context).requestFocus(FocusNode()),
-                        child: const Icon(Icons.chat_bubble_outline, size: 26),
-                      ),
+                      const Icon(Icons.chat_bubble_outline, size: 26),
                       const SizedBox(width: 16),
                       GestureDetector(
                         onTap: _openChat,
                         child: const Icon(Icons.send_outlined, size: 26),
+                      ),
+                      const Spacer(),
+                      GestureDetector(
+                        onTap: _handleSave,
+                        child: Icon(
+                          _saved ? Icons.bookmark : Icons.bookmark_border,
+                          color: _saved
+                              ? Theme.of(context).colorScheme.primary
+                              : null,
+                          size: 28,
+                        ),
                       ),
                     ],
                   ),
@@ -259,19 +321,15 @@ class _PostDetailPageState extends State<PostDetailPage> {
                 // Like count
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 14),
-                  child: Text(
-                    '$_likeCount likes',
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                    ),
-                  ),
+                  child: Text('$_likeCount likes',
+                      style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w600, fontSize: 13)),
                 ),
 
                 // Caption
                 if (caption.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
+                    padding: const EdgeInsets.fromLTRB(14, 4, 14, 4),
                     child: RichText(
                       text: TextSpan(
                         style: GoogleFonts.inter(
@@ -289,32 +347,25 @@ class _PostDetailPageState extends State<PostDetailPage> {
                     ),
                   ),
 
-                // Created at
-                if (widget.post['created_at'] != null)
+                // Timestamp
+                if (createdAt != null)
                   Padding(
-                    padding: const EdgeInsets.fromLTRB(14, 0, 14, 8),
+                    padding: const EdgeInsets.fromLTRB(14, 4, 14, 8),
                     child: Text(
-                      _formatTime(widget.post['created_at'] as String),
+                      _formatTime(createdAt),
                       style: GoogleFonts.inter(
-                        fontSize: 11,
-                        color: Colors.grey[500],
-                      ),
+                          fontSize: 11, color: Colors.grey[500]),
                     ),
                   ),
 
-                // Divider before comments
                 const Divider(height: 1),
 
-                // Comment section header
+                // Comments header
                 Padding(
                   padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
-                  child: Text(
-                    'Comments',
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                    ),
-                  ),
+                  child: Text('Comments',
+                      style: GoogleFonts.inter(
+                          fontWeight: FontWeight.w600, fontSize: 14)),
                 ),
 
                 // Comments list
@@ -328,13 +379,9 @@ class _PostDetailPageState extends State<PostDetailPage> {
                   Padding(
                     padding: const EdgeInsets.all(20),
                     child: Center(
-                      child: Text(
-                        'No comments yet. Be the first!',
-                        style: GoogleFonts.inter(
-                          fontSize: 13,
-                          color: Colors.grey[500],
-                        ),
-                      ),
+                      child: Text('No comments yet. Be the first!',
+                          style: GoogleFonts.inter(
+                              fontSize: 13, color: Colors.grey[500])),
                     ),
                   )
                 else
@@ -342,33 +389,26 @@ class _PostDetailPageState extends State<PostDetailPage> {
                     final comment = c as Map<String, dynamic>;
                     final isAi = comment['is_ai_reply'] == true;
                     final authorName = comment['author_name'] as String? ?? '';
+                    final authorAvatar =
+                        comment['author_avatar'] as String? ?? '';
                     final content = comment['content'] as String? ?? '';
-                    final createdAt = comment['created_at'] as String? ?? '';
+                    final commentCreatedAt =
+                        comment['created_at'] as String? ?? '';
                     final replyTo = comment['reply_to'];
 
                     return Padding(
                       padding: EdgeInsets.fromLTRB(
-                        replyTo != null ? 40 : 14,
-                        6,
-                        14,
-                        6,
-                      ),
+                          replyTo != null ? 40 : 14, 6, 14, 6),
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          CircleAvatar(
-                            radius: 14,
-                            backgroundColor: isAi
+                          _buildAvatar(
+                            authorAvatar,
+                            authorName,
+                            14,
+                            fallbackColor: isAi
                                 ? const Color(0xFFDD2A7B)
-                                : Colors.grey[400],
-                            child: Text(
-                              authorName.isNotEmpty ? authorName[0] : '?',
-                              style: GoogleFonts.inter(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: Colors.white,
-                              ),
-                            ),
+                                : Colors.grey[400]!,
                           ),
                           const SizedBox(width: 10),
                           Expanded(
@@ -398,11 +438,9 @@ class _PostDetailPageState extends State<PostDetailPage> {
                                 ),
                                 const SizedBox(height: 2),
                                 Text(
-                                  _formatTime(createdAt),
+                                  _formatTime(commentCreatedAt),
                                   style: GoogleFonts.inter(
-                                    fontSize: 11,
-                                    color: Colors.grey[500],
-                                  ),
+                                      fontSize: 11, color: Colors.grey[500]),
                                 ),
                               ],
                             ),
@@ -417,22 +455,17 @@ class _PostDetailPageState extends State<PostDetailPage> {
             ),
           ),
 
-          // Comment input bar (fixed at bottom)
+          // Comment input bar
           Container(
             decoration: BoxDecoration(
               color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
               border: Border(
                 top: BorderSide(
-                  color: isDark ? Colors.white12 : Colors.grey[300]!,
-                ),
+                    color: isDark ? Colors.white12 : Colors.grey[300]!),
               ),
             ),
             padding: EdgeInsets.fromLTRB(
-              14,
-              8,
-              8,
-              MediaQuery.of(context).padding.bottom + 8,
-            ),
+                14, 8, 8, MediaQuery.of(context).padding.bottom + 8),
             child: Row(
               children: [
                 Expanded(
@@ -442,9 +475,7 @@ class _PostDetailPageState extends State<PostDetailPage> {
                     decoration: InputDecoration(
                       hintText: 'Add a comment...',
                       hintStyle: GoogleFonts.inter(
-                        fontSize: 14,
-                        color: Colors.grey[500],
-                      ),
+                          fontSize: 14, color: Colors.grey[500]),
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(20),
                         borderSide: BorderSide.none,
@@ -454,9 +485,7 @@ class _PostDetailPageState extends State<PostDetailPage> {
                           ? Colors.white.withValues(alpha: 0.08)
                           : Colors.grey[100],
                       contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 10,
-                      ),
+                          horizontal: 16, vertical: 10),
                     ),
                     textInputAction: TextInputAction.send,
                     onSubmitted: (_) => _submitComment(),
@@ -488,17 +517,36 @@ class _PostDetailPageState extends State<PostDetailPage> {
     );
   }
 
-  String _formatTime(String isoString) {
-    try {
-      final dt = DateTime.parse(isoString);
-      final now = DateTime.now();
-      final diff = now.difference(dt);
-      if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
-      if (diff.inHours < 24) return '${diff.inHours}h ago';
-      if (diff.inDays < 7) return '${diff.inDays}d ago';
-      return '${dt.month}/${dt.day}/${dt.year}';
-    } catch (_) {
-      return '';
+  Widget _buildAvatar(String url, String name, double radius,
+      {Color? fallbackColor}) {
+    final bgColor = fallbackColor ?? Colors.grey[300]!;
+    if (url.isNotEmpty) {
+      return CircleAvatar(
+        radius: radius,
+        backgroundColor: bgColor,
+        child: ClipOval(
+          child: CachedNetworkImage(
+            imageUrl: url,
+            width: radius * 2,
+            height: radius * 2,
+            fit: BoxFit.cover,
+            errorWidget: (_, __, ___) => Text(
+              name.isNotEmpty ? name[0] : 'A',
+              style: GoogleFonts.inter(
+                  fontWeight: FontWeight.w600, color: Colors.white),
+            ),
+          ),
+        ),
+      );
     }
+    return CircleAvatar(
+      radius: radius,
+      backgroundColor: bgColor,
+      child: Text(
+        name.isNotEmpty ? name[0] : 'A',
+        style:
+            GoogleFonts.inter(fontWeight: FontWeight.w600, color: Colors.white),
+      ),
+    );
   }
 }

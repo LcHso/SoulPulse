@@ -8,11 +8,21 @@ build/
 
 # Environment & secrets
 .env
+.env.production
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
+
+# Deployment data
+data/
+certbot/
 
 # Vector DB data
 chroma_data/
+
+# Static uploads
+backend/static/
 
 # IDE
 .vscode/

@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:video_player/video_player.dart';
 import '../../core/api/api_client.dart';
-import '../chat/chat_page.dart';
 
 class StoryPlayerPage extends StatefulWidget {
   final List<dynamic> stories;
@@ -26,35 +27,67 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
   late int _currentIndex;
   VideoPlayerController? _controller;
   bool _initialized = false;
+  bool _isImage = false;
+  String? _imageUrl;
   String? _error;
 
   @override
   void initState() {
     super.initState();
     _currentIndex = widget.initialIndex;
-    _loadVideo();
+    _loadMedia();
   }
 
-  Future<void> _loadVideo() async {
+  bool _urlIsImage(String url) {
+    final lower = url.toLowerCase();
+    return lower.endsWith('.png') ||
+        lower.endsWith('.jpg') ||
+        lower.endsWith('.jpeg') ||
+        lower.endsWith('.gif') ||
+        lower.endsWith('.webp');
+  }
+
+  Future<void> _loadMedia() async {
     setState(() {
       _initialized = false;
+      _isImage = false;
+      _imageUrl = null;
       _error = null;
     });
 
     _controller?.dispose();
+    _controller = null;
 
     final story = widget.stories[_currentIndex];
-    final videoUrl = story['video_url'] as String? ?? '';
+    final mediaUrl = story['video_url'] as String? ?? '';
 
-    if (videoUrl.isEmpty) {
-      setState(() => _error = 'No video available');
+    // Mark story as viewed
+    final storyId = story['id'] as int?;
+    if (storyId != null) {
+      ApiClient.post('/api/feed/stories/$storyId/view', {})
+          .catchError((_) => <String, dynamic>{});
+    }
+
+    if (mediaUrl.isEmpty) {
+      setState(() => _error = 'No media available');
       return;
     }
 
-    // Use the image-proxy endpoint to avoid CORS issues
-    final proxiedUrl = ApiClient.proxyImageUrl(videoUrl);
-    final controller = VideoPlayerController.networkUrl(Uri.parse(proxiedUrl));
+    if (_urlIsImage(mediaUrl)) {
+      setState(() {
+        _isImage = true;
+        _imageUrl = mediaUrl;
+        _initialized = true;
+      });
+      Future.delayed(const Duration(seconds: 5), () {
+        if (mounted && _currentIndex == widget.stories.indexOf(story)) {
+          _nextStory();
+        }
+      });
+      return;
+    }
 
+    final controller = VideoPlayerController.networkUrl(Uri.parse(mediaUrl));
     try {
       await controller.initialize();
       controller.setLooping(true);
@@ -66,37 +99,30 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() => _error = 'Failed to load video');
-      }
+      if (mounted) setState(() => _error = 'Failed to load video');
     }
   }
 
   void _nextStory() {
     if (_currentIndex < widget.stories.length - 1) {
       _currentIndex++;
-      _loadVideo();
+      _loadMedia();
     } else {
-      Navigator.of(context).pop();
+      context.pop();
     }
   }
 
   void _prevStory() {
     if (_currentIndex > 0) {
       _currentIndex--;
-      _loadVideo();
+      _loadMedia();
     }
   }
 
   void _openChat() {
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(
-        builder: (_) => ChatPage(
-          aiId: widget.aiId,
-          aiName: widget.aiName,
-        ),
-      ),
-    );
+    context.pop();
+    final aiName = Uri.encodeComponent(widget.aiName);
+    context.push('/chat/${widget.aiId}?name=$aiName');
   }
 
   @override
@@ -122,16 +148,28 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
           }
         },
         onVerticalDragEnd: (details) {
-          // Swipe down to dismiss
-          if (details.primaryVelocity != null && details.primaryVelocity! > 300) {
-            Navigator.of(context).pop();
+          if (details.primaryVelocity != null &&
+              details.primaryVelocity! > 300) {
+            context.pop();
           }
         },
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // Video or loading/error state
-            if (_initialized && _controller != null)
+            if (_initialized && _isImage && _imageUrl != null)
+              Center(
+                child: CachedNetworkImage(
+                  imageUrl: _imageUrl!,
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: double.infinity,
+                  errorWidget: (_, __, ___) => const Center(
+                    child: Icon(Icons.broken_image_outlined,
+                        size: 48, color: Colors.white54),
+                  ),
+                ),
+              )
+            else if (_initialized && _controller != null)
               Center(
                 child: AspectRatio(
                   aspectRatio: _controller!.value.aspectRatio,
@@ -140,55 +178,15 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
               )
             else if (_error != null)
               Center(
-                child: Text(
-                  _error!,
-                  style: GoogleFonts.inter(color: Colors.white54, fontSize: 14),
-                ),
+                child: Text(_error!,
+                    style:
+                        GoogleFonts.inter(color: Colors.white54, fontSize: 14)),
               )
             else
               const Center(
-                child: CircularProgressIndicator(color: Colors.white),
-              ),
+                  child: CircularProgressIndicator(color: Colors.white)),
 
-            // Top bar: close button + persona name
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 8,
-              left: 12,
-              right: 12,
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 16,
-                    backgroundColor: Colors.grey[700],
-                    child: Text(
-                      widget.aiName.isNotEmpty ? widget.aiName[0] : 'A',
-                      style: GoogleFonts.inter(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Colors.white,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      widget.aiName,
-                      style: GoogleFonts.inter(
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 14,
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-            ),
-
-            // Progress indicator dots
+            // Progress bars
             if (widget.stories.length > 1)
               Positioned(
                 top: MediaQuery.of(context).padding.top + 2,
@@ -212,7 +210,41 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
                 ),
               ),
 
-            // Bottom: caption + DM button
+            // Top bar
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 8,
+              left: 12,
+              right: 12,
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 16,
+                    backgroundColor: Colors.grey[700],
+                    child: Text(
+                      widget.aiName.isNotEmpty ? widget.aiName[0] : 'A',
+                      style: GoogleFonts.inter(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(widget.aiName,
+                        style: GoogleFonts.inter(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 14)),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white),
+                    onPressed: () => context.pop(),
+                  ),
+                ],
+              ),
+            ),
+
+            // Bottom caption + DM
             Positioned(
               bottom: MediaQuery.of(context).padding.bottom + 16,
               left: 16,
@@ -230,10 +262,7 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
                           color: Colors.white,
                           fontSize: 15,
                           shadows: [
-                            const Shadow(
-                              blurRadius: 8,
-                              color: Colors.black54,
-                            ),
+                            const Shadow(blurRadius: 8, color: Colors.black54)
                           ],
                         ),
                       ),
@@ -244,18 +273,14 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
                       onPressed: _openChat,
                       icon: const Icon(Icons.chat_bubble_outline,
                           size: 18, color: Colors.white),
-                      label: Text(
-                        'Send message',
-                        style: GoogleFonts.inter(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
+                      label: Text('Send message',
+                          style: GoogleFonts.inter(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w500)),
                       style: OutlinedButton.styleFrom(
                         side: const BorderSide(color: Colors.white54),
                         shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(24),
-                        ),
+                            borderRadius: BorderRadius.circular(24)),
                         padding: const EdgeInsets.symmetric(vertical: 10),
                       ),
                     ),

@@ -1,0 +1,60 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soulpulse-backend
+    restart: unless-stopped
+    volumes:
+      - ./data/soulpulse.db:/app/soulpulse.db
+      - ./data/chroma_data:/app/chroma_data
+      - ./backend/static:/app/static
+      - ./backend/.env.production:/app/.env:ro
+    networks:
+      - soulpulse-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soulpulse-scheduler
+    restart: unless-stopped
+    command: ["python3", "scripts/run_all_schedulers.py"]
+    volumes:
+      - ./data/soulpulse.db:/app/soulpulse.db
+      - ./data/chroma_data:/app/chroma_data
+      - ./backend/static:/app/static
+      - ./backend/.env.production:/app/.env:ro
+    networks:
+      - soulpulse-net
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: soulpulse-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./frontend/build/web:/usr/share/nginx/html:ro
+      - ./backend/static:/usr/share/nginx/static:ro
+      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+    networks:
+      - soulpulse-net
+    depends_on:
+      - backend
+
+networks:
+  soulpulse-net:
+    driver: bridge

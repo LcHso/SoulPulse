@@ -1,0 +1,35 @@
+# Large generated directories
+frontend/.dart_tool/
+frontend/build/
+frontend/android/.gradle/
+frontend/ios/Pods/
+frontend/ios/.symlinks/
+
+# Python cache
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Database files (large, binary)
+*.db
+*.db-journal
+chroma_data/
+
+# Dependencies (use pubspec.yaml/requirements.txt instead)
+frontend/.pub-cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+
+# PRD is large, skip for code tasks
+SoulPulse-Prd.md
