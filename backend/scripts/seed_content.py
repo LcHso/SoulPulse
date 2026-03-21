@@ -13,8 +13,8 @@ from models.story import Story
 from sqlalchemy import select, delete
 
 
-# Base URL for static files (will be served by FastAPI)
-STATIC_BASE = "http://localhost:8001/static"
+# Base URL for static files - use relative paths so they work in any environment
+STATIC_BASE = "/static"
 
 # Map persona name -> slug used in filenames
 PERSONA_SLUGS = {
