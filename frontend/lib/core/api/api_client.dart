@@ -74,7 +74,8 @@ class ApiClient {
       final err = jsonDecode(response.body);
       throw Exception(err['detail'] ?? 'Request failed');
     }
-    return jsonDecode(response.body);
+    return _rewriteUrls(jsonDecode(response.body))
+        as Map<String, dynamic>;
   }
 
   static Future<Map<String, dynamic>> patch(
@@ -88,7 +89,8 @@ class ApiClient {
       final err = jsonDecode(response.body);
       throw Exception(err['detail'] ?? 'Request failed');
     }
-    return jsonDecode(response.body);
+    return _rewriteUrls(jsonDecode(response.body))
+        as Map<String, dynamic>;
   }
 
   static Future<Map<String, dynamic>> delete(String path,
@@ -143,7 +145,7 @@ class ApiClient {
     if (response.statusCode >= 400) {
       throw Exception('Request failed');
     }
-    final data = jsonDecode(response.body) as List<dynamic>;
+    final data = _rewriteUrls(jsonDecode(response.body)) as List<dynamic>;
     if (useCache) {
       _cache[path] = _CacheEntry.list(data);
     }
@@ -156,17 +158,51 @@ class ApiClient {
           .get(Uri.parse('$baseUrl$path'), headers: _headers)
           .timeout(const Duration(seconds: 15));
       if (response.statusCode < 400) {
-        _cache[path] =
-            _CacheEntry.list(jsonDecode(response.body) as List<dynamic>);
+        _cache[path] = _CacheEntry.list(
+            _rewriteUrls(jsonDecode(response.body)) as List<dynamic>);
       }
     } catch (_) {
       // Silent background refresh failure
     }
   }
 
+  /// Rewrite image URLs so that hardcoded localhost references point to the
+  /// configured [baseUrl].  Also accepts relative paths like "/static/…".
   static String proxyImageUrl(String originalUrl) {
     if (originalUrl.isEmpty) return '';
+    // Relative path — prepend the API base URL
+    if (originalUrl.startsWith('/')) {
+      return '$baseUrl$originalUrl';
+    }
+    // Rewrite any leftover localhost URLs to the real base
+    if (originalUrl.contains('localhost:8001')) {
+      return originalUrl.replaceFirst(
+          RegExp(r'https?://localhost:8001'), baseUrl);
+    }
+    if (originalUrl.contains('127.0.0.1:8001')) {
+      return originalUrl.replaceFirst(
+          RegExp(r'https?://127\.0\.0\.1:8001'), baseUrl);
+    }
     return originalUrl;
+  }
+
+  /// Recursively rewrite all URL-like string values in a decoded JSON object.
+  static dynamic _rewriteUrls(dynamic data) {
+    if (data is String) {
+      if (data.contains('localhost:8001') ||
+          data.contains('127.0.0.1:8001') ||
+          (data.startsWith('/static/') && !data.startsWith('http'))) {
+        return proxyImageUrl(data);
+      }
+      return data;
+    }
+    if (data is Map<String, dynamic>) {
+      return data.map((k, v) => MapEntry(k, _rewriteUrls(v)));
+    }
+    if (data is List) {
+      return data.map(_rewriteUrls).toList();
+    }
+    return data;
   }
 
   /// GET that returns a map. Supports stale-while-revalidate caching.
@@ -187,7 +223,8 @@ class ApiClient {
     if (response.statusCode >= 400) {
       throw Exception('Request failed');
     }
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
+    final data =
+        _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
     if (useCache) {
       _cache[path] = _CacheEntry.map(data);
     }
@@ -200,8 +237,8 @@ class ApiClient {
           .get(Uri.parse('$baseUrl$path'), headers: _headers)
           .timeout(const Duration(seconds: 15));
       if (response.statusCode < 400) {
-        _cache[path] =
-            _CacheEntry.map(jsonDecode(response.body) as Map<String, dynamic>);
+        _cache[path] = _CacheEntry.map(
+            _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>);
       }
     } catch (_) {}
   }
