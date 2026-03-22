@@ -227,9 +227,10 @@ async def _exec_enthusiastic_post(
             style_tags=persona.ins_style_tags,
             caption=caption,
         )
-        from services.image_gen_service import generate_image
+        from services.image_gen_service import generate_image, download_to_static
         urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
-        media_url = urls[0] if urls else ""
+        if urls:
+            media_url = await download_to_static(urls[0], prefix=f"gen_{persona.id}")
     except Exception as e:
         print(f"[emotion-sched] enthusiastic_post image failed: {e}")
 

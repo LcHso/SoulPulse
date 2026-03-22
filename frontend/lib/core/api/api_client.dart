@@ -74,8 +74,7 @@ class ApiClient {
       final err = jsonDecode(response.body);
       throw Exception(err['detail'] ?? 'Request failed');
     }
-    return _rewriteUrls(jsonDecode(response.body))
-        as Map<String, dynamic>;
+    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   static Future<Map<String, dynamic>> patch(
@@ -89,8 +88,7 @@ class ApiClient {
       final err = jsonDecode(response.body);
       throw Exception(err['detail'] ?? 'Request failed');
     }
-    return _rewriteUrls(jsonDecode(response.body))
-        as Map<String, dynamic>;
+    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   static Future<Map<String, dynamic>> delete(String path,

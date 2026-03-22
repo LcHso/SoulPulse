@@ -5,12 +5,17 @@ Uses the DashScope HTTP API for async image synthesis tasks.
 """
 
 import asyncio
+import uuid
+from pathlib import Path
+
 import httpx
 
 from core.config import settings
 
 _DASHSCOPE_IMAGE_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
 _DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+
+_STATIC_DIR = Path(__file__).parent.parent / "static" / "posts"
 
 
 def _headers() -> dict:
@@ -68,3 +73,29 @@ async def generate_image(prompt: str, size: str = "1024*1024", n: int = 1) -> li
             # else PENDING / RUNNING, keep polling
 
         raise TimeoutError("Image generation timed out after 5 minutes")
+
+
+async def download_to_static(url: str, prefix: str = "post") -> str:
+    """Download a remote image to local /static/posts/ and return the relative path.
+
+    Args:
+        url: Remote image URL (e.g. Aliyun OSS temporary link).
+        prefix: Filename prefix for the saved file.
+
+    Returns:
+        Relative URL like '/static/posts/post_abc123.png'.
+    """
+    if not url:
+        return ""
+    _STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
+    filepath = _STATIC_DIR / filename
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            filepath.write_bytes(resp.content)
+        return f"/static/posts/{filename}"
+    except Exception as e:
+        print(f"[image_gen] Failed to download image: {e}")
+        return url  # fallback to original URL
