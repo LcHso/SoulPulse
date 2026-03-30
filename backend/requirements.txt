@@ -13,3 +13,5 @@ oss2>=2.18.0
 chromadb>=0.5.0
 aiosqlite>=0.20.0
 python-dotenv>=1.0.0
+# Firebase Cloud Messaging (optional - for push notifications)
+firebase-admin>=6.0.0

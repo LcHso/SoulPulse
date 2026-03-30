@@ -3,6 +3,8 @@ plugins {
     id "kotlin-android"
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id "dev.flutter.flutter-gradle-plugin"
+    // Google Services plugin for Firebase (must be at the bottom)
+    id "com.google.gms.google-services"
 }
 
 def keystoreProperties = new Properties()
@@ -58,4 +60,13 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // Firebase BOM (Bill of Materials) - manages versions
+    implementation platform('com.google.firebase:firebase-bom:33.0.0')
+    // Firebase Cloud Messaging
+    implementation 'com.google.firebase:firebase-messaging'
+    // Firebase Analytics (optional but recommended)
+    implementation 'com.google.firebase:firebase-analytics'
 }

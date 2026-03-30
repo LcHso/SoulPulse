@@ -8,6 +8,7 @@ import 'core/theme/app_theme.dart';
 import 'core/router/app_router.dart';
 import 'core/providers/auth_provider.dart';
 import 'core/services/local_notification_service.dart';
+import 'core/services/fcm_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,6 +17,17 @@ void main() async {
   // Initialize local notifications (Android only)
   if (!kIsWeb) {
     await LocalNotificationService.init();
+  }
+
+  // Initialize FCM (will gracefully fail if not configured)
+  if (!kIsWeb) {
+    try {
+      await FcmService().initialize();
+      print('[Main] FCM initialized');
+    } catch (e) {
+      print('[Main] FCM initialization skipped: $e');
+      // FCM will fall back to local notification polling
+    }
   }
 
   // Global error handling

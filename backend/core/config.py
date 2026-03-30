@@ -43,5 +43,8 @@ class Settings(BaseModel):
     # Story expiration (hours)
     STORY_EXPIRATION_HOURS: int = int(_env("STORY_EXPIRATION_HOURS", "24"))
 
+    # Firebase Cloud Messaging (optional - for push notifications)
+    FIREBASE_SERVICE_ACCOUNT_PATH: str = _env("FIREBASE_SERVICE_ACCOUNT_PATH", "")
+
 
 settings = Settings()
