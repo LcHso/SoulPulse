@@ -8,8 +8,8 @@ import '../api/api_client.dart';
 @pragma('vm:entry-point')
 void onDidReceiveNotificationResponse(NotificationResponse response) {
   // Store the payload for the app to handle when it's ready
-  LocalNotificationService._pendingPayload = response.payload;
-  LocalNotificationService._onTapController.add(response.payload ?? '');
+  LocalNotificationService.pendingPayload = response.payload;
+  LocalNotificationService.onTapController.add(response.payload ?? '');
 }
 
 class LocalNotificationService {
@@ -21,17 +21,19 @@ class LocalNotificationService {
   static bool _initialized = false;
 
   /// Stream that emits notification payload when user taps a notification.
-  static final StreamController<String> _onTapController =
+  /// Public for FCM service to emit events.
+  static final StreamController<String> onTapController =
       StreamController<String>.broadcast();
-  static Stream<String> get onNotificationTap => _onTapController.stream;
+  static Stream<String> get onNotificationTap => onTapController.stream;
 
-  static String? _pendingPayload;
+  /// Pending payload from notification tap (public for FCM service).
+  static String? pendingPayload;
 
   /// Get and clear any pending payload from a notification tap that
   /// launched or resumed the app.
   static String? consumePendingPayload() {
-    final p = _pendingPayload;
-    _pendingPayload = null;
+    final p = pendingPayload;
+    pendingPayload = null;
     return p;
   }
 
