@@ -226,19 +226,47 @@ async def _exec_enthusiastic_post(
 
     media_url = ""
     try:
+        # Check if persona has a base face for Visual Identity system
+        base_face_url = getattr(persona, 'base_face_url', None)
+        visual_prompt_tags = getattr(persona, 'visual_prompt_tags', None)
+
+        # Generate scene prompt (without face details if using face reference)
         img_prompt = await generate_image_prompt(
             persona_prompt=persona.personality_prompt,
             style_tags=persona.ins_style_tags,
             caption=caption,
-            visual_description=getattr(persona, 'visual_description', None),
+            visual_description=visual_prompt_tags,  # Use visual tags for scene description
         )
-        from services.image_gen_service import generate_image, download_to_static
-        urls = await generate_image(
-            prompt=img_prompt,
-            size="720*1280",
-            n=1,
-            persona_id=persona.id,  # Pass persona_id for consistent seed
+
+        from services.image_gen_service import (
+            generate_image,
+            generate_image_with_face_ref,
+            download_to_static,
+            DEFAULT_NEGATIVE_PROMPT,
         )
+
+        # Use face reference if base_face_url is available (Visual Identity system)
+        if base_face_url:
+            print(f"[emotion-sched] Using face reference for {persona.name}")
+            # Generate with face reference - prompt focuses on scene/action
+            urls = await generate_image_with_face_ref(
+                prompt=img_prompt,
+                face_ref_url=base_face_url,
+                size="720*1280",
+                n=1,
+                persona_id=persona.id,
+                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            )
+        else:
+            # Fallback to standard generation
+            urls = await generate_image(
+                prompt=img_prompt,
+                size="720*1280",
+                n=1,
+                persona_id=persona.id,
+                negative_prompt=DEFAULT_NEGATIVE_PROMPT,
+            )
+
         if urls:
             media_url = await download_to_static(urls[0], prefix=f"gen_{persona.id}")
     except Exception as e:

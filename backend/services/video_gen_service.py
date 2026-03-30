@@ -2,6 +2,10 @@
 
 Generates short lifestyle video clips for AI persona Stories / posts.
 Uses the DashScope HTTP API for async video synthesis tasks.
+
+Features:
+- Standard text-to-video generation
+- Image reference for consistent character appearance in videos
 """
 
 import asyncio
@@ -47,6 +51,69 @@ async def generate_video(prompt: str, duration: float = 5.0) -> str:
             raise RuntimeError(f"No task_id in response: {data}")
 
         # Poll — video generation is slower, allow up to 10 minutes
+        poll_url = _DASHSCOPE_TASK_URL.format(task_id=task_id)
+        poll_headers = {"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}"}
+
+        for _ in range(120):
+            await asyncio.sleep(5)
+            poll_resp = await client.get(poll_url, headers=poll_headers)
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+
+            status = poll_data.get("output", {}).get("task_status")
+            if status == "SUCCEEDED":
+                video_url = poll_data["output"].get("video_url", "")
+                if not video_url:
+                    results = poll_data["output"].get("results", [])
+                    if results:
+                        video_url = results[0].get("url", "")
+                return video_url
+            elif status in ("FAILED", "UNKNOWN"):
+                msg = poll_data.get("output", {}).get("message", "Unknown error")
+                raise RuntimeError(f"Video generation failed: {msg}")
+
+        raise TimeoutError("Video generation timed out after 10 minutes")
+
+
+async def generate_video_with_image_ref(
+    prompt: str,
+    image_ref_url: str,
+    duration: float = 5.0,
+) -> str:
+    """Generate a video with image reference for consistent character appearance.
+
+    This uses the base portrait as a visual guide for the video generation,
+    ensuring the character in the video matches the one in posts.
+
+    Args:
+        prompt: Scene/action description for the video.
+        image_ref_url: URL of the reference image (base portrait).
+        duration: Target duration in seconds (typically 3-10s).
+
+    Returns:
+        URL of the generated video.
+    """
+    payload = {
+        "model": settings.DASHSCOPE_VIDEO_MODEL,
+        "input": {
+            "prompt": prompt,
+            "image_ref": image_ref_url,  # Image reference for character consistency
+        },
+        "parameters": {
+            "duration": duration,
+            "ref_strength": 0.7,  # Weight for image reference influence
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(_DASHSCOPE_VIDEO_URL, json=payload, headers=_headers())
+        resp.raise_for_status()
+        data = resp.json()
+
+        task_id = data.get("output", {}).get("task_id")
+        if not task_id:
+            raise RuntimeError(f"No task_id in response: {data}")
+
         poll_url = _DASHSCOPE_TASK_URL.format(task_id=task_id)
         poll_headers = {"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}"}
 

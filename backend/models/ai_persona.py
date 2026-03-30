@@ -33,6 +33,12 @@ class AIPersona(Base):
     ins_style_tags: Mapped[str] = mapped_column(String(500), default="")
     # Visual description for consistent AI image generation
     visual_description: Mapped[str] = mapped_column(Text, nullable=True)
+    # Visual Identity (VI) System - for face reference consistency
+    # Base portrait URL - the "ID photo" for face reference
+    base_face_url: Mapped[str] = mapped_column(String(500), nullable=True)
+    # Fixed visual prompt tags for consistent character appearance
+    # Example: "silver hair, sharp jawline, deep blue eyes, tall"
+    visual_prompt_tags: Mapped[str] = mapped_column(Text, nullable=True)
     avatar_url: Mapped[str] = mapped_column(String(500), default="")
     timezone: Mapped[str] = mapped_column(String(50), default="Asia/Shanghai")
     # Display order for listing (lower = first)
