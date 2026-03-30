@@ -359,11 +359,42 @@ def get_param_overrides(state: EmotionState) -> dict:
 # ── Proactive trigger checks ───────────────────────────────────────
 
 def check_proactive_triggers(
-    state: EmotionState, intimacy: float,
+    state: EmotionState,
+    intimacy: float,
+    has_sent_welcome: bool = False,
+    has_relevant_memory: bool = False,
 ) -> list[str]:
-    """Return a list of trigger names whose conditions are met."""
+    """Return a list of trigger names whose conditions are met.
+
+    Triggers are checked in order of intimacy requirement (low to high).
+    New triggers for earlier engagement:
+    - welcome_dm: First connection, intimacy 1-3, welcome not yet sent
+    - daily_checkin: Intimacy >= 2, last interaction > 24h ago
+    - memory_recall: Intimacy >= 3, has relevant memory to reference
+    """
     triggers: list[str] = []
 
+    # ── New triggers for earlier engagement ─────────────────────────────
+    # welcome_dm: Welcome new users after first meaningful interaction
+    if not has_sent_welcome and 1.0 <= intimacy < 3.0:
+        triggers.append("welcome_dm")
+
+    # daily_checkin: Check in if user hasn't chatted in 24h
+    if intimacy >= 2.0:
+        now = datetime.now(timezone.utc)
+        last = state.last_interaction_at
+        if last is not None:
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            hours_since = (now - last).total_seconds() / 3600
+            if hours_since >= 24:
+                triggers.append("daily_checkin")
+
+    # memory_recall: Reference a shared memory when intimacy allows
+    if intimacy >= 3.0 and has_relevant_memory:
+        triggers.append("memory_recall")
+
+    # ── Original triggers (unchanged) ───────────────────────────────────
     if state.longing > 0.7 and intimacy >= 5.0:
         triggers.append("longing_dm")
 

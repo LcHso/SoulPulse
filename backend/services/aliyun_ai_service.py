@@ -452,9 +452,26 @@ async def generate_image_prompt(
     persona_prompt: str,
     style_tags: str,
     caption: str,
+    visual_description: str | None = None,
 ) -> str:
-    """Use LLM to generate a detailed image prompt matching the persona and caption."""
+    """Use LLM to generate a detailed image prompt matching the persona and caption.
+
+    Args:
+        persona_prompt: The persona's personality description.
+        style_tags: Instagram-style tags for visual consistency.
+        caption: The post caption to match.
+        visual_description: Fixed visual traits for character consistency (optional).
+
+    Returns:
+        Detailed image prompt for AI image generation.
+    """
     client = _get_client()
+
+    # Build character description with visual consistency
+    character_desc = persona_prompt[:200]
+    if visual_description:
+        character_desc = f"{visual_description}. {character_desc}"
+
     messages = [
         {
             "role": "system",
@@ -464,13 +481,15 @@ async def generate_image_prompt(
                 "The photo should look like a real lifestyle photograph, NOT AI-generated. "
                 "Include: subject description, setting, lighting, mood, camera angle. "
                 "Style tags to match: " + style_tags + "\n"
+                "IMPORTANT: Maintain character visual consistency across all images.\n"
+                "Quality: high resolution, natural lighting, real photograph style.\n"
                 "Reply ONLY with the image prompt in English, nothing else. "
                 "Keep it under 200 words."
             ),
         },
         {
             "role": "user",
-            "content": f"Character: {persona_prompt[:200]}\nCaption: {caption}\nGenerate the photo prompt.",
+            "content": f"Character (maintain visual consistency): {character_desc}\nCaption: {caption}\nGenerate the photo prompt.",
         },
     ]
     response = await client.chat.completions.create(

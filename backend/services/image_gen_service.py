@@ -5,6 +5,7 @@ Uses the DashScope HTTP API for async image synthesis tasks.
 """
 
 import asyncio
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -18,6 +19,23 @@ _DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
 _STATIC_DIR = Path(__file__).parent.parent / "static" / "posts"
 
 
+def _get_persona_seed(persona_id: int) -> int:
+    """Generate deterministic seed from persona ID for consistent image style.
+
+    Same persona_id always produces the same seed, ensuring visual consistency
+    across different generated images for the same character.
+
+    Args:
+        persona_id: The AI persona's unique identifier.
+
+    Returns:
+        Integer seed for image generation API.
+    """
+    # Use MD5 hash of persona_id to create a stable, unique seed
+    hex_hash = hashlib.md5(f"persona_{persona_id}".encode()).hexdigest()[:8]
+    return int(hex_hash, 16)
+
+
 def _headers() -> dict:
     return {
         "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
@@ -26,21 +44,33 @@ def _headers() -> dict:
     }
 
 
-async def generate_image(prompt: str, size: str = "1024*1024", n: int = 1) -> list[str]:
+async def generate_image(
+    prompt: str,
+    size: str = "1024*1024",
+    n: int = 1,
+    persona_id: int | None = None,
+) -> list[str]:
     """Generate image(s) from a text prompt using DashScope Wanx model.
 
     Args:
         prompt: Detailed text description of the image to generate.
         size: Image dimensions, e.g. "1024*1024", "720*1280" (4:5 portrait).
         n: Number of images to generate (1-4).
+        persona_id: AI persona ID for consistent image style (deterministic seed).
 
     Returns:
         List of image URLs.
     """
+    parameters = {"size": size, "n": n}
+
+    # Add deterministic seed for persona consistency
+    if persona_id is not None:
+        parameters["seed"] = _get_persona_seed(persona_id)
+
     payload = {
         "model": settings.DASHSCOPE_IMAGE_MODEL,
         "input": {"prompt": prompt},
-        "parameters": {"size": size, "n": n},
+        "parameters": parameters,
     }
 
     async with httpx.AsyncClient(timeout=60) as client:

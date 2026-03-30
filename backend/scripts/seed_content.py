@@ -25,6 +25,15 @@ PERSONA_SLUGS = {
     "Ethan": "ethan",  # legacy persona, no images yet
 }
 
+# Visual descriptions for consistent AI image generation
+# Each persona has fixed visual traits for character consistency
+VISUAL_DESCRIPTIONS = {
+    "陆晨曦": "young Asian female, long brown wavy hair, gentle smile, casual cozy fashion, warm aesthetic",
+    "顾言深": "young Asian male, short black hair, serious expression, minimalist dark style, professional look",
+    "林屿": "young Asian male, short sporty hair, energetic smile, athletic wear, bright youthful vibe",
+    "沈默白": "young Asian male, slightly long messy hair, mysterious calm expression, traditional elegant style",
+}
+
 # Post content per persona: list of (caption, is_close_friend)
 POST_DATA = {
     "陆晨曦": [
@@ -76,12 +85,16 @@ async def seed_content(force_recreate: bool = False):
             await db.commit()
             print("[seed-content] Deleted all existing posts and stories")
 
-        # ── Update avatar URLs ─────────────────────────────────
+        # ── Update avatar URLs and visual descriptions ─────────────────────────────────
         for name, persona in personas.items():
             slug = PERSONA_SLUGS.get(name)
             if slug and slug != "ethan":
                 persona.avatar_url = f"{STATIC_BASE}/avatars/{slug}.png"
                 print(f"[seed-content] Updated avatar: {name} -> {persona.avatar_url}")
+            # Set visual description for consistent image generation
+            if name in VISUAL_DESCRIPTIONS:
+                persona.visual_description = VISUAL_DESCRIPTIONS[name]
+                print(f"[seed-content] Set visual description for {name}")
 
         await db.commit()
 

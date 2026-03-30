@@ -31,6 +31,8 @@ class AIPersona(Base):
     # Personality archetype for recommendations: e.g., "温柔治愈", "高冷傲娇", "阳光开朗"
     archetype: Mapped[str] = mapped_column(String(50), default="")
     ins_style_tags: Mapped[str] = mapped_column(String(500), default="")
+    # Visual description for consistent AI image generation
+    visual_description: Mapped[str] = mapped_column(Text, nullable=True)
     avatar_url: Mapped[str] = mapped_column(String(500), default="")
     timezone: Mapped[str] = mapped_column(String(50), default="Asia/Shanghai")
     # Display order for listing (lower = first)

@@ -55,6 +55,10 @@ _COOLDOWNS: dict[str, int] = {
     "moody_story": 43200,         # 12 h
     "enthusiastic_post": 43200,   # 12 h
     "memory_care_dm": 86400,      # 24 h
+    # New triggers for earlier engagement
+    "welcome_dm": 604800,         # 7 days (one-time welcome, long cooldown)
+    "daily_checkin": 86400,       # 24 h
+    "memory_recall": 172800,      # 48 h
 }
 
 
@@ -226,9 +230,15 @@ async def _exec_enthusiastic_post(
             persona_prompt=persona.personality_prompt,
             style_tags=persona.ins_style_tags,
             caption=caption,
+            visual_description=getattr(persona, 'visual_description', None),
         )
         from services.image_gen_service import generate_image, download_to_static
-        urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
+        urls = await generate_image(
+            prompt=img_prompt,
+            size="720*1280",
+            n=1,
+            persona_id=persona.id,  # Pass persona_id for consistent seed
+        )
         if urls:
             media_url = await download_to_static(urls[0], prefix=f"gen_{persona.id}")
     except Exception as e:
@@ -304,11 +314,224 @@ async def _exec_memory_care_dm(
     )
 
 
+async def _exec_welcome_dm(
+    db, state: EmotionState, persona: AIPersona,
+):
+    """Send a welcome DM to new users who just started connecting."""
+    from openai import AsyncOpenAI
+    from core.config import settings
+
+    client = AsyncOpenAI(
+        api_key=settings.DASHSCOPE_API_KEY,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    prompt = (
+        f"{persona.personality_prompt[:300]}\n\n"
+        "You've just connected with someone new. Send a warm, friendly welcome message "
+        "(1-2 sentences). Be inviting and show you're happy to meet them. "
+        "Reply ONLY with the message text."
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.DASHSCOPE_CHARACTER_MODEL,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Write a welcome message."},
+            ],
+            temperature=0.85,
+            max_tokens=150,
+        )
+        message = response.choices[0].message.content
+    except Exception as e:
+        print(f"[emotion-sched] welcome_dm generation failed: {e}")
+        return
+
+    dm = ProactiveDM(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        event="welcome",
+        message=message,
+    )
+    db.add(dm)
+
+    chat_msg = ChatMessage(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        role="assistant",
+        content=message,
+        message_type="proactive_dm",
+        event="welcome",
+        delivered=0,
+    )
+    db.add(chat_msg)
+
+    # Create notification
+    db.add(Notification(
+        user_id=state.user_id,
+        type="proactive_dm",
+        title=f"Message from {persona.name}",
+        body=message[:200],
+        data_json=f'{{"ai_id": {persona.id}, "ai_name": "{persona.name}", "type": "welcome"}}',
+    ))
+
+    await _log_trigger(db, state.user_id, state.ai_id, "welcome_dm")
+    print(f"[emotion-sched] welcome_dm for user={state.user_id} ai={persona.id}: {message[:60]}...")
+
+
+async def _exec_daily_checkin(
+    db, state: EmotionState, persona: AIPersona,
+):
+    """Send a daily check-in message when user hasn't chatted in 24h."""
+    from openai import AsyncOpenAI
+    from core.config import settings
+
+    client = AsyncOpenAI(
+        api_key=settings.DASHSCOPE_API_KEY,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    prompt = (
+        f"{persona.personality_prompt[:300]}\n\n"
+        "It's been a while since you last chatted. Send a casual, friendly check-in "
+        "message (1-2 sentences). Don't be pushy, just show you care. "
+        "Reply ONLY with the message text."
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.DASHSCOPE_CHARACTER_MODEL,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Write a check-in message."},
+            ],
+            temperature=0.85,
+            max_tokens=150,
+        )
+        message = response.choices[0].message.content
+    except Exception as e:
+        print(f"[emotion-sched] daily_checkin generation failed: {e}")
+        return
+
+    dm = ProactiveDM(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        event="daily_checkin",
+        message=message,
+    )
+    db.add(dm)
+
+    chat_msg = ChatMessage(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        role="assistant",
+        content=message,
+        message_type="proactive_dm",
+        event="daily_checkin",
+        delivered=0,
+    )
+    db.add(chat_msg)
+
+    db.add(Notification(
+        user_id=state.user_id,
+        type="proactive_dm",
+        title=f"Message from {persona.name}",
+        body=message[:200],
+        data_json=f'{{"ai_id": {persona.id}, "ai_name": "{persona.name}", "type": "checkin"}}',
+    ))
+
+    await _log_trigger(db, state.user_id, state.ai_id, "daily_checkin")
+    print(f"[emotion-sched] daily_checkin for user={state.user_id} ai={persona.id}: {message[:60]}...")
+
+
+async def _exec_memory_recall(
+    db, state: EmotionState, persona: AIPersona,
+):
+    """Send a message referencing a shared memory."""
+    from openai import AsyncOpenAI
+    from core.config import settings
+    from services.memory_service import MemoryService
+
+    client = AsyncOpenAI(
+        api_key=settings.DASHSCOPE_API_KEY,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    # Try to get a relevant memory
+    memory_service = MemoryService()
+    try:
+        memories = await memory_service.get_relevant_memories(
+            user_id=state.user_id,
+            ai_id=state.ai_id,
+            query="shared experience conversation memory",
+            limit=3,
+        )
+        memory_context = ""
+        if memories:
+            memory_context = f"\n\nRemember this about them: {memories[0].get('content', '')[:200]}"
+    except Exception:
+        memory_context = ""
+
+    prompt = (
+        f"{persona.personality_prompt[:300]}{memory_context}\n\n"
+        "You suddenly remembered something about this person. Send a short message "
+        "(1-2 sentences) that naturally brings up that memory. Be warm and nostalgic. "
+        "Reply ONLY with the message text."
+    )
+    try:
+        response = await client.chat.completions.create(
+            model=settings.DASHSCOPE_CHARACTER_MODEL,
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Write a memory recall message."},
+            ],
+            temperature=0.85,
+            max_tokens=150,
+        )
+        message = response.choices[0].message.content
+    except Exception as e:
+        print(f"[emotion-sched] memory_recall generation failed: {e}")
+        return
+
+    dm = ProactiveDM(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        event="memory_recall",
+        message=message,
+    )
+    db.add(dm)
+
+    chat_msg = ChatMessage(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        role="assistant",
+        content=message,
+        message_type="proactive_dm",
+        event="memory_recall",
+        delivered=0,
+    )
+    db.add(chat_msg)
+
+    db.add(Notification(
+        user_id=state.user_id,
+        type="proactive_dm",
+        title=f"Message from {persona.name}",
+        body=message[:200],
+        data_json=f'{{"ai_id": {persona.id}, "ai_name": "{persona.name}", "type": "memory"}}',
+    ))
+
+    await _log_trigger(db, state.user_id, state.ai_id, "memory_recall")
+    print(f"[emotion-sched] memory_recall for user={state.user_id} ai={persona.id}: {message[:60]}...")
+
+
 _EXECUTORS = {
     "longing_dm": _exec_longing_dm,
     "moody_story": _exec_moody_story,
     "enthusiastic_post": _exec_enthusiastic_post,
     "memory_care_dm": _exec_memory_care_dm,
+    # New triggers
+    "welcome_dm": _exec_welcome_dm,
+    "daily_checkin": _exec_daily_checkin,
+    "memory_recall": _exec_memory_recall,
 }
 
 
@@ -349,8 +572,32 @@ async def run_emotion_scan():
             interaction = interactions.get((state.user_id, state.ai_id))
             intimacy = interaction.intimacy_score if interaction else 0.0
 
-            # 3. Check triggers
-            triggers = emotion_engine.check_proactive_triggers(state, intimacy)
+            # 3. Check if welcome_dm already sent
+            welcome_sent_result = await db.execute(
+                select(EmotionTriggerLog).where(
+                    EmotionTriggerLog.user_id == state.user_id,
+                    EmotionTriggerLog.ai_id == state.ai_id,
+                    EmotionTriggerLog.trigger_type == "welcome_dm",
+                ).limit(1)
+            )
+            has_sent_welcome = welcome_sent_result.scalar_one_or_none() is not None
+
+            # 4. Check if there are relevant memories
+            from models.memory_entry import MemoryEntry
+            memories_result = await db.execute(
+                select(MemoryEntry).where(
+                    MemoryEntry.user_id == state.user_id,
+                    MemoryEntry.ai_id == state.ai_id,
+                ).limit(1)
+            )
+            has_relevant_memory = memories_result.scalar_one_or_none() is not None
+
+            # 5. Check triggers
+            triggers = emotion_engine.check_proactive_triggers(
+                state, intimacy,
+                has_sent_welcome=has_sent_welcome,
+                has_relevant_memory=has_relevant_memory,
+            )
 
             persona = personas.get(state.ai_id)
             if not persona:

@@ -40,5 +40,8 @@ class Settings(BaseModel):
     # CORS allowed origins (comma-separated, "*" for dev)
     ALLOWED_ORIGINS: str = _env("ALLOWED_ORIGINS", "*")
 
+    # Story expiration (hours)
+    STORY_EXPIRATION_HOURS: int = int(_env("STORY_EXPIRATION_HOURS", "24"))
+
 
 settings = Settings()
