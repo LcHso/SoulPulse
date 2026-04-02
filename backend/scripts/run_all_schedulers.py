@@ -16,6 +16,7 @@ sys.path.insert(0, ".")
 from core.database import init_db
 from scripts.emotion_scheduler import run_scheduler as run_emotion_scheduler
 from scripts.post_scheduler import run_scheduler as run_post_scheduler
+from scripts.post_scheduler import _run_auto_approve_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +33,7 @@ async def main():
     await asyncio.gather(
         run_emotion_scheduler(),
         run_post_scheduler(),
+        _run_auto_approve_loop(),
     )
 
 

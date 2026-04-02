@@ -1,3 +1,24 @@
+// ============================================================================
+// SoulPulse 聊天页面
+// ============================================================================
+//
+// 本文件提供与 AI 人设的实时聊天界面，包含：
+// - WebSocket 实时消息收发
+// - 历史消息加载与分页
+// - AI 情绪状态显示
+// - 消息气泡渲染（用户消息、AI回复、主动消息等）
+// - 消息操作菜单（复制、删除）
+// - 连接状态指示器
+// - 正在输入动画效果
+//
+// 主要组件：
+// - ChatPage: 页面根组件
+// - _ChatMsg: 聊天消息数据模型
+// - _MessageBubble: 消息气泡组件
+// - _TypingIndicator: 正在输入动画组件
+//
+// ============================================================================
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -7,11 +28,28 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 
+/// 聊天页面组件
+///
+/// 提供与指定 AI 的实时聊天功能。
+/// 支持从帖子发起带上下文的聊天。
+///
+/// 参数：
+/// - aiId: AI 人设的 ID
+/// - aiName: AI 名称（用于显示）
+/// - postContext: 可选的帖子上下文（从帖子发起聊天时传入）
 class ChatPage extends StatefulWidget {
+  /// 目标 AI 的 ID
   final int aiId;
+
+  /// AI 名称（用于页面标题显示）
   final String aiName;
+
+  /// 帖子上下文（可选）
+  ///
+  /// 从帖子发起聊天时，将帖子内容作为上下文传递给 AI
   final String? postContext;
 
+  /// 构造函数
   const ChatPage({
     super.key,
     required this.aiId,
@@ -23,106 +61,186 @@ class ChatPage extends StatefulWidget {
   State<ChatPage> createState() => _ChatPageState();
 }
 
+/// 聊天页面状态类
+///
+/// 使用 TickerProviderStateMixin 以支持动画控制器。
+///
+/// 管理功能：
+/// - WebSocket 连接与消息监听
+/// - 历史消息加载与分页滚动
+/// - 消息发送与状态更新
+/// - AI 情绪状态获取
+/// - 消息删除与复制
+/// - 正在输入动画
 class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
+  /// 消息输入框控制器
   final _messageCtrl = TextEditingController();
+
+  /// 消息列表滚动控制器
   final _scrollCtrl = ScrollController();
+
+  /// 本地消息列表
+  ///
+  /// 包含用户发送的消息和 AI 回复的消息
   final List<_ChatMsg> _messages = [];
 
+  /// WebSocket 客户端实例
   WsClient? _wsClient;
+
+  /// WebSocket 消息流订阅
   StreamSubscription? _wsSub;
+
+  /// 当前 WebSocket 连接状态
   WsConnectionStatus _connectionStatus = WsConnectionStatus.disconnected;
 
+  /// 是否正在发送消息（用于显示加载状态）
   bool _sending = false;
+
+  /// 是否正在加载历史消息
   bool _loadingHistory = false;
+
+  /// 是否还有更多历史消息可加载
   bool _hasMoreHistory = true;
+
+  /// 已加载的最旧消息 ID（用于分页加载）
   int? _oldestMessageId;
 
-  // Emotion status
+  /// AI 当前情绪状态（用于状态栏显示）
   String? _emotionMood;
 
-  // Typing animation
+  /// AI 角色本地时间（如 "22:30"）
+  String? _personaLocalTime;
+
+  /// AI 角色时区（如 "Asia/Shanghai"）
+  String? _personaTimezone;
+
+  /// 正在输入动画控制器
+  ///
+  /// 使用 TickerProviderStateMixin 提供 vsync
   late AnimationController _typingAnimCtrl;
 
   @override
   void initState() {
     super.initState();
+
+    // 监听滚动事件，实现向上滚动时加载更多历史消息
     _scrollCtrl.addListener(_onScroll);
+
+    // 初始化正在输入动画控制器
     _typingAnimCtrl = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
-    )..repeat();
+    )..repeat(); // 循环播放动画
+
+    // 加载历史消息
     _loadHistory();
+
+    // 建立 WebSocket 连接
     _connectWebSocket();
+
+    // 加载 AI 情绪状态
     _loadEmotionStatus();
   }
 
   @override
   void dispose() {
-    // Mark conversation as read when leaving
+    // 离开页面时标记对话为已读
     ApiClient.post('/api/chat/mark-read/${widget.aiId}', {})
         .catchError((_) => <String, dynamic>{});
+
+    // 清理监听器和控制器
     _scrollCtrl.removeListener(_onScroll);
     _scrollCtrl.dispose();
     _messageCtrl.dispose();
     _typingAnimCtrl.dispose();
+
+    // 取消 WebSocket 订阅并释放客户端
     _wsSub?.cancel();
     _wsClient?.dispose();
+
     super.dispose();
   }
 
-  // -- Emotion status -------------------------------------------------------
+  // ================== 情绪状态加载 ==================
 
+  /// 加载 AI 当前情绪状态
+  ///
+  /// 获取 AI 的 mood 字段并更新状态栏显示
   Future<void> _loadEmotionStatus() async {
     try {
       final data = await ApiClient.get('/api/ai/emotion/${widget.aiId}');
       if (mounted) {
         setState(() {
           _emotionMood = data['mood'] as String?;
+          _personaLocalTime = data['persona_local_time'] as String?;
+          _personaTimezone = data['persona_timezone'] as String?;
         });
       }
-    } catch (_) {}
+    } catch (_) {
+      // 加载失败时静默处理
+    }
   }
 
-  // -- History loading -------------------------------------------------------
+  // ================== 历史消息加载 ==================
 
+  /// 加载聊天历史消息
+  ///
+  /// 支持分页加载：
+  /// - 首次加载获取最近 30 条消息
+  /// - 向上滚动时加载更早的消息
+  ///
+  /// [beforeId] 分页加载时传入最旧消息 ID，获取更早的消息
   Future<void> _loadHistory({int? beforeId}) async {
+    // 防止重复加载
     if (_loadingHistory) return;
     if (beforeId == null && !_hasMoreHistory) return;
 
     setState(() => _loadingHistory = true);
 
     try {
+      // 构造 API 路径
       String path = '/api/chat/history/${widget.aiId}?limit=30';
       if (beforeId != null) path += '&before_id=$beforeId';
 
+      // 获取历史消息
       final result = await ApiClient.get(path, useCache: false);
       final List<dynamic> messagesJson = result['messages'] ?? [];
       final hasMore = result['has_more'] ?? false;
 
+      // 解析消息列表
       final newMessages =
           messagesJson.map((m) => _ChatMsg.fromJson(m)).toList();
 
       if (mounted) {
         setState(() {
           if (beforeId != null) {
+            // 分页加载：在列表开头插入新消息
             _messages.insertAll(0, newMessages);
           } else {
+            // 首次加载：清空并重新填充消息列表
             _messages.clear();
+
+            // 如果有帖子上下文，添加上下文提示消息
             if (widget.postContext != null && widget.postContext!.isNotEmpty) {
               _messages.add(_ChatMsg(
                 text: 'Regarding post: "${widget.postContext}"',
                 isUser: false,
-                isContext: true,
+                isContext: true, // 标记为上下文消息
               ));
             }
+
             _messages.addAll(newMessages);
           }
+
+          // 更新分页状态
           _hasMoreHistory = hasMore;
           if (newMessages.isNotEmpty) {
             _oldestMessageId = newMessages.first.id;
           }
           _loadingHistory = false;
         });
+
+        // 首次加载时滚动到底部
         if (beforeId == null) _scrollToBottom();
       }
     } catch (e) {
@@ -130,6 +248,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
+  /// 滚动监听回调
+  ///
+  /// 当用户滚动到顶部附近时，触发加载更多历史消息
   void _onScroll() {
     if (_scrollCtrl.position.pixels < 100 &&
         _hasMoreHistory &&
@@ -139,23 +260,37 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
-  // -- WebSocket connection -------------------------------------------------
+  // ================== WebSocket 连接管理 ==================
 
+  /// 建立 WebSocket 连接
+  ///
+  /// 创建 WsClient 实例并监听消息流
   void _connectWebSocket() {
     _wsClient = WsClient(
       aiId: widget.aiId,
       onStatusChange: (status) {
+        // 更新连接状态（用于 UI 显示）
         if (mounted) setState(() => _connectionStatus = status);
       },
     );
+
+    // 监听 WebSocket 消息
     _wsSub = _wsClient!.messages.listen(_onWsMessage);
+
+    // 建立连接
     _wsClient!.connect();
   }
 
+  /// WebSocket 消息处理回调
+  ///
+  /// 根据消息类型分发到相应的处理方法
+  ///
+  /// [msg] WebSocket 消息数据（Map 格式）
   void _onWsMessage(Map<String, dynamic> msg) {
     final type = msg['type'] as String?;
     final data = msg['data'] as Map<String, dynamic>? ?? {};
 
+    // 根据消息类型处理
     switch (type) {
       case WsMessageType.aiReply:
         _onAiReply(data);
@@ -164,6 +299,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         _onProactiveDm(data);
         break;
       case WsMessageType.messageSaved:
+        // 消息保存确认，无需特殊处理
         break;
       case WsMessageType.error:
         _onWsError(data);
@@ -171,13 +307,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
+  /// 处理 AI 回复消息
+  ///
+  /// 将 AI 回复添加到消息列表
+  ///
+  /// [data] 回复消息数据
   void _onAiReply(Map<String, dynamic> data) {
     final text = data['text'] as String? ?? '';
     final messageId = data['message_id'] as int?;
     final timestamp = data['created_at'] as String?;
 
     setState(() {
+      // 停止发送状态
       _sending = false;
+
+      // 添加 AI 回复消息
       _messages.add(_ChatMsg(
         id: messageId,
         text: text,
@@ -185,66 +329,99 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         timestamp: timestamp ?? DateTime.now().toIso8601String(),
       ));
     });
+
     _scrollToBottom();
   }
 
+  /// 处理 AI 主动发送的消息
+  ///
+  /// AI 可能主动向用户发送问候或关心消息
+  ///
+  /// [data] 主动消息数据
   void _onProactiveDm(Map<String, dynamic> data) {
     final text = data['text'] as String? ?? '';
     final messageId = data['message_id'] as int?;
-    final event = data['event'] as String?;
+    final event = data['event'] as String?; // 事件类型标签
 
     setState(() {
       _messages.add(_ChatMsg(
         id: messageId,
         text: text,
         isUser: false,
-        messageType: 'proactive_dm',
+        messageType: 'proactive_dm', // 标记为主动消息
         event: event,
         timestamp: DateTime.now().toIso8601String(),
       ));
     });
+
     _scrollToBottom();
   }
 
+  /// 处理 WebSocket 错误
+  ///
+  /// 显示错误消息并停止发送状态
+  ///
+  /// [data] 错误数据
   void _onWsError(Map<String, dynamic> data) {
     final detail = data['detail'] as String? ?? 'Unknown error';
+
     if (_sending) {
       setState(() {
         _sending = false;
+
+        // 添加错误提示消息
         _messages.add(_ChatMsg(
           text: 'Failed to send: $detail',
           isUser: false,
-          isError: true,
+          isError: true, // 标记为错误消息
         ));
       });
     }
   }
 
-  // -- Send message ---------------------------------------------------------
+  // ================== 消息发送 ==================
 
+  /// 发送用户消息
+  ///
+  /// 通过 WebSocket 或 REST API 发送消息
+  /// WebSocket 断开时自动降级到 REST API
   Future<void> _send() async {
     final text = _messageCtrl.text.trim();
     if (text.isEmpty) return;
 
     setState(() {
+      // 添加用户消息到本地列表
       _messages.add(_ChatMsg(
         text: text,
         isUser: true,
         timestamp: DateTime.now().toIso8601String(),
       ));
+
+      // 清空输入框
       _messageCtrl.clear();
+
+      // 设置发送状态
       _sending = true;
     });
+
     _scrollToBottom();
 
+    // 根据连接状态选择发送方式
     if (_connectionStatus == WsConnectionStatus.connected &&
         _wsClient != null) {
+      // WebSocket 连接正常，通过 WebSocket 发送
       _wsClient!.sendMessage(text, postContext: widget.postContext);
     } else {
+      // WebSocket 断开，降级到 REST API
       await _sendViaRest(text);
     }
   }
 
+  /// 通过 REST API 发送消息
+  ///
+  /// WebSocket 断开时的降级方案
+  ///
+  /// [text] 消息文本
   Future<void> _sendViaRest(String text) async {
     try {
       final result = await ApiClient.post('/api/chat/send', {
@@ -252,9 +429,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         'message': text,
         if (widget.postContext != null) 'post_context': widget.postContext,
       });
+
       if (mounted) {
         setState(() {
           _sending = false;
+
+          // 添加 AI 回复
           _messages.add(_ChatMsg(
             id: result['message_id'] as int?,
             text: result['reply'] ?? '...',
@@ -268,6 +448,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (mounted) {
         setState(() {
           _sending = false;
+
+          // 显示错误提示
           _messages.add(_ChatMsg(
             text: 'Failed to get reply. Please try again.',
             isUser: false,
@@ -278,14 +460,22 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
-  // -- Delete message -------------------------------------------------------
+  // ================== 消息删除 ==================
 
+  /// 删除消息
+  ///
+  /// 仅支持删除用户发送的消息
+  ///
+  /// [index] 消息在列表中的索引
   Future<void> _deleteMessage(int index) async {
     final msg = _messages[index];
+
+    // 仅允许删除有 ID 的用户消息
     if (msg.id == null || !msg.isUser) return;
 
     try {
       await ApiClient.delete('/api/chat/messages/${msg.id}');
+
       if (mounted) {
         setState(() => _messages.removeAt(index));
       }
@@ -298,14 +488,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
+  /// 显示消息操作菜单
+  ///
+  /// 长按消息时弹出菜单，提供复制和删除选项
+  ///
+  /// [index] 消息在列表中的索引
   void _showMessageMenu(int index) {
     final msg = _messages[index];
+
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            /// 复制文本选项
             ListTile(
               leading: const Icon(Icons.copy),
               title: const Text('Copy text'),
@@ -319,6 +516,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 );
               },
             ),
+
+            /// 删除选项（仅对用户消息显示）
             if (msg.isUser && msg.id != null)
               ListTile(
                 leading: const Icon(Icons.delete, color: Colors.red),
@@ -335,6 +534,9 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     );
   }
 
+  /// 滚动到底部
+  ///
+  /// 发送或收到新消息后自动滚动
   void _scrollToBottom() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollCtrl.hasClients) {
@@ -347,11 +549,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     });
   }
 
-  // -- UI -------------------------------------------------------------------
+  // ================== UI 辅助方法 ==================
 
+  /// 获取连接状态文本
+  ///
+  /// 用于 AppBar 状态栏显示
   String get _statusText {
     switch (_connectionStatus) {
       case WsConnectionStatus.connected:
+        // 显示 AI 当前情绪状态
         if (_emotionMood != null) {
           return 'Feeling $_emotionMood';
         }
@@ -365,43 +571,59 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
+  /// 获取连接状态颜色
+  ///
+  /// 根据状态和情绪返回对应的颜色
   Color get _statusColor {
     switch (_connectionStatus) {
       case WsConnectionStatus.connected:
         return _moodColor(_emotionMood);
       case WsConnectionStatus.connecting:
       case WsConnectionStatus.reconnecting:
-        return Colors.orange;
+        return Colors.orange; // 等待状态
       case WsConnectionStatus.disconnected:
-        return Colors.grey;
+        return Colors.grey; // 断开状态
     }
   }
 
+  /// 根据情绪获取对应颜色
+  ///
+  /// [mood] 情绪类型字符串
   Color _moodColor(String? mood) {
     switch (mood) {
       case 'joyful':
-        return Colors.amber;
+        return Colors.amber; // 快乐：琥珀色
       case 'good':
-        return Colors.green;
+        return Colors.green; // 良好：绿色
       case 'neutral':
-        return Colors.blue;
+        return Colors.blue; // 中性：蓝色
       case 'subdued':
-        return Colors.orange;
+        return Colors.orange; // 低落：橙色
       case 'melancholic':
-        return Colors.indigo;
+        return Colors.indigo; // 悲伤：靛蓝色
       default:
         return Colors.green;
     }
   }
 
+  /// 判断是否需要显示日期分隔符
+  ///
+  /// 在不同日期的消息之间显示日期标签
+  ///
+  /// [index] 当前消息索引
   bool _shouldShowDateSeparator(int index) {
     if (index == 0) return true;
+
     final current = _messages[index].timestamp;
     final prev = _messages[index - 1].timestamp;
+
     if (current == null || prev == null) return false;
+
     try {
       final currentDate = DateTime.parse(current).toLocal();
       final prevDate = DateTime.parse(prev).toLocal();
+
+      // 如果日期不同，显示分隔符
       return currentDate.day != prevDate.day ||
           currentDate.month != prevDate.month ||
           currentDate.year != prevDate.year;
@@ -410,25 +632,39 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
+  /// 格式化日期分隔符文本
+  ///
+  /// 显示 "Today"、"Yesterday" 或具体日期
+  ///
+  /// [isoString] ISO 8601 格式的时间字符串
   String _formatDateSeparator(String? isoString) {
     if (isoString == null) return '';
+
     try {
       final dt = DateTime.parse(isoString).toLocal();
       final now = DateTime.now();
+
+      // 今天
       if (dt.year == now.year && dt.month == now.month && dt.day == now.day) {
         return 'Today';
       }
+
+      // 昨天
       final yesterday = now.subtract(const Duration(days: 1));
       if (dt.year == yesterday.year &&
           dt.month == yesterday.month &&
           dt.day == yesterday.day) {
         return 'Yesterday';
       }
+
+      // 其他日期：显示月/日/年
       return '${dt.month}/${dt.day}/${dt.year}';
     } catch (_) {
       return '';
     }
   }
+
+  // ================== 页面构建 ==================
 
   @override
   Widget build(BuildContext context) {
@@ -440,6 +676,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           icon: const Icon(Icons.arrow_back),
           onPressed: () => context.pop(),
         ),
+
+        /// AppBar 标题区域
+        ///
+        /// 点击可导航到 AI 详情页面
         title: GestureDetector(
           onTap: () {
             final aiName = Uri.encodeComponent(widget.aiName);
@@ -447,27 +687,35 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           },
           child: Row(
             children: [
+              /// AI 头像
               CircleAvatar(
                 radius: 16,
                 backgroundColor: Colors.grey[300],
                 child: Text(
-                  widget.aiName[0],
+                  widget.aiName[0], // 显示名称首字母
                   style: GoogleFonts.inter(
                       fontWeight: FontWeight.w600, color: Colors.grey[700]),
                 ),
               ),
+
               const SizedBox(width: 10),
+
+              /// AI 名称和状态
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    /// AI 名称
                     Text(
                       widget.aiName,
                       style: GoogleFonts.inter(
                           fontSize: 16, fontWeight: FontWeight.w600),
                     ),
+
+                    /// 连接状态指示
                     Row(
                       children: [
+                        /// 状态指示点
                         Container(
                           width: 6,
                           height: 6,
@@ -477,6 +725,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                           ),
                         ),
                         const SizedBox(width: 4),
+
+                        /// 状态文本
                         Text(
                           _statusText,
                           style: GoogleFonts.inter(
@@ -484,6 +734,22 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         ),
                       ],
                     ),
+
+                    /// 时区提示（当 AI 角色时区与用户设备时区不同时显示）
+                    if (_personaLocalTime != null &&
+                        _personaLocalTime!.isNotEmpty &&
+                        _personaTimezone != null &&
+                        _personaTimezone!.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          'Their time: $_personaLocalTime',
+                          style: GoogleFonts.inter(
+                            fontSize: 10,
+                            color: Colors.grey[500],
+                          ),
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -493,7 +759,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       ),
       body: Column(
         children: [
-          // Loading indicator at top for pagination
+          // ================== 顶部加载指示器 ==================
+          /// 分页加载历史消息时显示
           if (_loadingHistory)
             const Padding(
               padding: EdgeInsets.all(8),
@@ -503,9 +770,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   child: CircularProgressIndicator(strokeWidth: 2)),
             ),
 
-          // Messages
+          // ================== 消息列表 ==================
           Expanded(
             child: _messages.isEmpty && !_loadingHistory
+                // 无消息时的空状态提示
                 ? Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
@@ -519,6 +787,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       ],
                     ),
                   )
+                // 消息列表
                 : ListView.builder(
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.symmetric(
@@ -530,6 +799,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
                       return Column(
                         children: [
+                          /// 日期分隔符
                           if (showDate)
                             Padding(
                               padding: const EdgeInsets.symmetric(vertical: 12),
@@ -539,6 +809,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                                     fontSize: 12, color: Colors.grey[500]),
                               ),
                             ),
+
+                          /// 消息气泡（长按显示操作菜单）
                           GestureDetector(
                             onLongPress: () => _showMessageMenu(index),
                             child: _MessageBubble(msg: msg, isDark: isDark),
@@ -549,7 +821,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   ),
           ),
 
-          // Typing indicator
+          // ================== 正在输入指示器 ==================
+          /// AI 正在回复时显示动画
           if (_sending)
             Padding(
               padding: const EdgeInsets.only(left: 20, bottom: 4),
@@ -562,7 +835,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
               ),
             ),
 
-          // Input bar
+          // ================== 消息输入栏 ==================
           Container(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             decoration: BoxDecoration(
@@ -575,11 +848,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
               top: false,
               child: Row(
                 children: [
+                  /// 消息输入框
                   Expanded(
                     child: TextField(
                       controller: _messageCtrl,
                       textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(),
+                      onSubmitted: (_) => _send(), // 回车发送
                       decoration: InputDecoration(
                         hintText: 'Message...',
                         border: OutlineInputBorder(
@@ -595,13 +869,16 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                       ),
                     ),
                   ),
+
                   const SizedBox(width: 8),
+
+                  /// 发送按钮
                   GestureDetector(
                     onTap: _sending ? null : _send,
                     child: Container(
                       padding: const EdgeInsets.all(10),
                       decoration: const BoxDecoration(
-                        color: Color(0xFF0095F6),
+                        color: Color(0xFF0095F6), // Instagram 蓝色
                         shape: BoxShape.circle,
                       ),
                       child:
@@ -618,12 +895,21 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   }
 }
 
-// -- Typing indicator with animated dots ------------------------------------
-
+// ============================================================================
+// 正在输入动画组件
+// ============================================================================
+//
+/// 显示 AI 正在输入的动画指示器
+///
+/// 使用三个动态缩放的圆点模拟输入效果
 class _TypingIndicator extends StatelessWidget {
+  /// 动画控制器
   final AnimationController animationController;
+
+  /// AI 名称（用于显示前缀文本）
   final String aiName;
 
+  /// 构造函数
   const _TypingIndicator(
       {required this.animationController, required this.aiName});
 
@@ -632,21 +918,29 @@ class _TypingIndicator extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        /// AI 名称前缀
         Text(
           '$aiName ',
           style: GoogleFonts.inter(
               fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
         ),
+
+        /// 动画圆点
         AnimatedBuilder(
           animation: animationController,
           builder: (context, child) {
             final progress = animationController.value;
+
             return Row(
               mainAxisSize: MainAxisSize.min,
               children: List.generate(3, (i) {
+                // 每个圆点有不同的延迟，创建波浪效果
                 final delay = i * 0.2;
+
+                // 计算当前圆点的透明度和缩放比例
                 final opacity = ((progress - delay) % 1.0).clamp(0.0, 1.0);
                 final scale = 0.5 + (opacity > 0.5 ? 1.0 - opacity : opacity);
+
                 return Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 1),
                   child: Transform.scale(
@@ -671,18 +965,45 @@ class _TypingIndicator extends StatelessWidget {
   }
 }
 
-// -- Chat message model -----------------------------------------------------
-
+// ============================================================================
+// 聊天消息数据模型
+// ============================================================================
+//
+/// 聊天消息数据类
+///
+/// 存储单条消息的所有信息
 class _ChatMsg {
+  /// 消息 ID（用于删除等操作）
   final int? id;
+
+  /// 消息文本内容
   final String text;
+
+  /// 是否为用户发送的消息
   final bool isUser;
+
+  /// 是否为上下文提示消息
+  ///
+  /// 从帖子发起聊天时，显示帖子内容作为上下文
   final bool isContext;
+
+  /// 是否为错误提示消息
   final bool isError;
+
+  /// 消息类型
+  ///
+  /// 可选值：'chat', 'proactive_dm'
   final String messageType;
+
+  /// 事件类型标签（用于主动消息）
+  ///
+  /// 如 'morning_greeting', 'care_reminder' 等
   final String? event;
+
+  /// 消息时间戳（ISO 8601 格式）
   final String? timestamp;
 
+  /// 构造函数
   _ChatMsg({
     this.id,
     required this.text,
@@ -694,8 +1015,14 @@ class _ChatMsg {
     this.timestamp,
   });
 
+  /// 从 JSON 数据创建消息对象
+  ///
+  /// 用于解析历史消息 API 返回的数据
+  ///
+  /// [json] API 返回的消息 JSON 对象
   factory _ChatMsg.fromJson(Map<String, dynamic> json) {
     final role = json['role'] as String? ?? 'assistant';
+
     return _ChatMsg(
       id: json['id'] as int?,
       text: json['content'] as String? ?? '',
@@ -707,16 +1034,36 @@ class _ChatMsg {
   }
 }
 
-// -- Message bubble widget --------------------------------------------------
-
+// ============================================================================
+// 消息气泡组件
+// ============================================================================
+//
+/// 消息气泡 Widget
+///
+/// 根据消息类型渲染不同样式的气泡：
+/// - 用户消息：蓝色气泡，右对齐
+/// - AI 回复：灰色气泡，左对齐
+/// - 上下文消息：绿色背景，带链接图标
+/// - 主动消息：粉色背景，带事件标签
+/// - 错误消息：红色背景
 class _MessageBubble extends StatelessWidget {
+  /// 消息数据
   final _ChatMsg msg;
+
+  /// 是否为深色模式
   final bool isDark;
 
+  /// 构造函数
   const _MessageBubble({required this.msg, required this.isDark});
 
+  /// 格式化时间显示
+  ///
+  /// 显示 HH:MM 格式的时间
+  ///
+  /// [isoString] ISO 8601 格式的时间字符串
   String _formatTime(String? isoString) {
     if (isoString == null) return '';
+
     try {
       final dt = DateTime.parse(isoString).toLocal();
       final hour = dt.hour.toString().padLeft(2, '0');
@@ -729,13 +1076,16 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Context bubble
+    // ================== 上下文消息气泡 ==================
+    /// 从帖子发起聊天时显示的上下文提示
     if (msg.isContext) {
       return Container(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF1A2A1A) : const Color(0xFFE8F5E9),
+          color: isDark
+              ? const Color(0xFF1A2A1A)
+              : const Color(0xFFE8F5E9), // 绿色背景
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
@@ -757,13 +1107,16 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    // Proactive DM bubble
+    // ================== 主动消息气泡 ==================
+    /// AI 主动发送的消息（问候、关心等）
     if (msg.messageType == 'proactive_dm') {
       return Container(
         margin: const EdgeInsets.only(bottom: 12),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF2A1A2A) : const Color(0xFFFCE4EC),
+          color: isDark
+              ? const Color(0xFF2A1A2A)
+              : const Color(0xFFFCE4EC), // 粉色背景
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: isDark ? Colors.pink[800]! : Colors.pink[200]!,
@@ -773,6 +1126,7 @@ class _MessageBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            /// 事件类型标签
             if (msg.event != null)
               Padding(
                 padding: const EdgeInsets.only(bottom: 4),
@@ -785,11 +1139,15 @@ class _MessageBubble extends StatelessWidget {
                   ),
                 ),
               ),
+
+            /// 消息内容
             Text(
               msg.text,
               style: GoogleFonts.inter(
                   fontSize: 14, color: isDark ? Colors.white : Colors.black87),
             ),
+
+            /// 时间戳
             if (msg.timestamp != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -804,22 +1162,30 @@ class _MessageBubble extends StatelessWidget {
       );
     }
 
-    // Regular message bubble
-    final bgColor = msg.isUser
-        ? const Color(0xFF0095F6)
-        : msg.isError
-            ? Colors.red.withValues(alpha: 0.15)
-            : (isDark ? const Color(0xFF262626) : const Color(0xFFEFEFEF));
+    // ================== 常规消息气泡 ==================
+    /// 用户消息或 AI 回复
 
+    /// 背景颜色
+    final bgColor = msg.isUser
+        ? const Color(0xFF0095F6) // 用户消息：Instagram 蓝色
+        : msg.isError
+            ? Colors.red.withValues(alpha: 0.15) // 错误消息：红色半透明
+            : (isDark
+                ? const Color(0xFF262626)
+                : const Color(0xFFEFEFEF)); // AI 回复：灰色
+
+    /// 文字颜色
     final textColor = msg.isUser
         ? Colors.white
         : msg.isError
             ? Colors.red
             : (isDark ? Colors.white : Colors.black);
 
+    /// 时间戳颜色
     final timeColor = msg.isUser ? Colors.white70 : Colors.grey[500];
 
     return Align(
+      // 用户消息右对齐，AI 消息左对齐
       alignment: msg.isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         margin: const EdgeInsets.only(bottom: 8),
@@ -831,6 +1197,7 @@ class _MessageBubble extends StatelessWidget {
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(18),
             topRight: const Radius.circular(18),
+            // 消息尾巴效果
             bottomLeft: Radius.circular(msg.isUser ? 18 : 4),
             bottomRight: Radius.circular(msg.isUser ? 4 : 18),
           ),
@@ -839,10 +1206,13 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment:
               msg.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
           children: [
+            /// 消息内容
             Text(
               msg.text,
               style: GoogleFonts.inter(fontSize: 14, color: textColor),
             ),
+
+            /// 时间戳
             if (msg.timestamp != null)
               Padding(
                 padding: const EdgeInsets.only(top: 4),

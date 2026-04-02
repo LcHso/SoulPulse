@@ -1,3 +1,49 @@
+"""
+信息流端点模块
+
+================================================================================
+功能概述
+================================================================================
+本模块提供 Instagram 风格的信息流相关 REST API 端点：
+- 帖子信息流：获取 AI 人格发布的帖子列表
+- 帖子详情：获取单个帖子的详细信息
+- 点赞/取消点赞：对帖子进行点赞操作
+- 收藏/取消收藏：保存帖子到个人收藏
+- Story 查看：获取和标记 Story
+- 评论系统：获取评论、发表评论、AI 回复评论
+
+================================================================================
+设计理念
+================================================================================
+1. 亲密度门控：
+   - 密友（close_friend）帖子只对亲密度 >= 6 的用户可见
+   - 点赞和评论会提升与 AI 的亲密度
+
+2. 批量加载优化：
+   - 使用 IN 查询批量加载用户的交互状态
+   - 避免 N+1 查询问题
+
+3. 延迟 AI 回复：
+   - 用户评论后，AI 会延迟 1-5 分钟再回复
+   - 模拟真实的社交媒体交互体验
+
+================================================================================
+API 端点列表
+================================================================================
+GET    /api/feed/posts              - 获取帖子信息流
+GET    /api/feed/posts/{post_id}    - 获取单个帖子详情
+POST   /api/feed/posts/{post_id}/like    - 点赞帖子
+DELETE /api/feed/posts/{post_id}/like    - 取消点赞
+POST   /api/feed/posts/{post_id}/save    - 收藏帖子
+DELETE /api/feed/posts/{post_id}/save    - 取消收藏
+GET    /api/feed/saved              - 获取收藏的帖子
+GET    /api/feed/stories            - 获取 Story 列表
+POST   /api/feed/stories/{story_id}/view - 标记 Story 已查看
+GET    /api/feed/image-proxy        - 图片代理（解决跨域）
+GET    /api/feed/posts/{post_id}/comments - 获取评论列表
+POST   /api/feed/posts/{post_id}/comments - 发表评论
+"""
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -32,7 +78,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/feed", tags=["feed"])
 
 
+# ── Pydantic 数据模型 ────────────────────────────────────
+
 class PostOut(BaseModel):
+    """
+    帖子输出模型。
+
+    Attributes:
+        id: 帖子 ID
+        ai_id: AI 人格 ID
+        ai_name: AI 人格名称
+        ai_avatar: AI 人格头像 URL
+        media_url: 媒体（图片/视频）URL
+        caption: 帖子文案
+        like_count: 点赞数
+        is_close_friend: 是否为密友可见帖子
+        is_liked: 当前用户是否已点赞
+        is_saved: 当前用户是否已收藏
+        created_at: 创建时间
+    """
     id: int
     ai_id: int
     ai_name: str
@@ -46,6 +110,8 @@ class PostOut(BaseModel):
     created_at: str
 
 
+# ── 帖子信息流 ────────────────────────────────────────────
+
 @router.get("/posts", response_model=list[PostOut])
 async def get_posts(
     limit: int = 20,
@@ -53,7 +119,21 @@ async def get_posts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch the Ins-style feed of posts with like/save status."""
+    """
+    获取 Instagram 风格的帖子信息流。
+
+    返回所有 AI 人格发布的帖子，包含点赞和收藏状态。
+    密友可见的帖子只对亲密度 >= 6 的用户显示。
+
+    Args:
+        limit: 返回数量上限（默认 20）
+        offset: 偏移量（用于分页）
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        list[PostOut]: 帖子列表
+    """
     result = await db.execute(
         select(Post, AIPersona)
         .join(AIPersona, Post.ai_id == AIPersona.id)
@@ -63,7 +143,7 @@ async def get_posts(
     )
     rows = result.all()
 
-    # Batch-load user's interactions for intimacy-based filtering
+    # 批量加载用户的交互记录，用于亲密度过滤
     ai_ids = list({post.ai_id for post, _ in rows})
     if ai_ids:
         interaction_result = await db.execute(
@@ -79,7 +159,7 @@ async def get_posts(
     else:
         intimacy_map = {}
 
-    # Batch-load user's likes and saves
+    # 批量加载用户的点赞和收藏状态
     post_ids = [post.id for post, _ in rows]
     liked_ids = set()
     saved_ids = set()
@@ -100,7 +180,7 @@ async def get_posts(
         )
         saved_ids = {row[0] for row in saves_result.all()}
 
-    # Filter: exclude close-friend posts for users with intimacy < 6.0
+    # 过滤：排除亲密度 < 6 的用户无法看到的密友帖子
     filtered = []
     for post, persona in rows:
         if post.is_close_friend:
@@ -127,7 +207,7 @@ async def get_posts(
     ]
 
 
-# ── Single post detail ─────────────────────────────────────────
+# ── 单个帖子详情 ─────────────────────────────────────────
 
 @router.get("/posts/{post_id}", response_model=PostOut)
 async def get_post(
@@ -135,7 +215,20 @@ async def get_post(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get a single post by ID."""
+    """
+    获取单个帖子的详细信息。
+
+    Args:
+        post_id: 帖子 ID
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        PostOut: 帖子详情
+
+    Raises:
+        HTTPException: 帖子不存在时返回 404 错误
+    """
     result = await db.execute(
         select(Post, AIPersona)
         .join(AIPersona, Post.ai_id == AIPersona.id)
@@ -146,7 +239,7 @@ async def get_post(
         raise HTTPException(status_code=404, detail="Post not found")
     post, persona = row
 
-    # Check like/save status
+    # 检查点赞和收藏状态
     liked_result = await db.execute(
         select(UserLike.id).where(
             UserLike.user_id == current_user.id,
@@ -178,7 +271,7 @@ async def get_post(
     )
 
 
-# ── Like / Unlike (idempotent) ──────────────────────────────────
+# ── 点赞/取消点赞（幂等操作）──────────────────────────
 
 @router.post("/posts/{post_id}/like")
 async def like_post(
@@ -186,13 +279,28 @@ async def like_post(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Like a post (idempotent). Returns current like state and count."""
+    """
+    点赞帖子（幂等操作）。
+
+    如果已点赞则不重复操作。点赞会提升与 AI 的亲密度（+0.5）。
+
+    Args:
+        post_id: 帖子 ID
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        dict: 点赞状态和点赞数
+
+    Raises:
+        HTTPException: 帖子不存在时返回 404 错误
+    """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
     if not post:
         raise HTTPException(status_code=404, detail="Post not found")
 
-    # Check if already liked
+    # 检查是否已点赞
     existing = await db.execute(
         select(UserLike).where(
             UserLike.user_id == current_user.id,
@@ -202,11 +310,11 @@ async def like_post(
     if existing.scalar_one_or_none():
         return {"liked": True, "like_count": post.like_count}
 
-    # Create like record
+    # 创建点赞记录
     db.add(UserLike(user_id=current_user.id, post_id=post_id))
     post.like_count += 1
 
-    # Update intimacy
+    # 更新亲密度
     interaction_result = await db.execute(
         select(Interaction).where(
             Interaction.user_id == current_user.id,
@@ -224,7 +332,7 @@ async def like_post(
         )
         db.add(interaction)
 
-    # Emotion: apply "like" effect
+    # 情绪：应用点赞效果
     emo = await emotion_engine.get_or_create(db, current_user.id, post.ai_id)
     emotion_engine.apply_interaction(emo, "like")
 
@@ -238,7 +346,20 @@ async def unlike_post(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Unlike a post."""
+    """
+    取消点赞帖子。
+
+    Args:
+        post_id: 帖子 ID
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        dict: 点赞状态和点赞数
+
+    Raises:
+        HTTPException: 帖子不存在时返回 404 错误
+    """
     result = await db.execute(select(Post).where(Post.id == post_id))
     post = result.scalar_one_or_none()
     if not post:
@@ -260,7 +381,7 @@ async def unlike_post(
     return {"liked": False, "like_count": post.like_count}
 
 
-# ── Save / Unsave ───────────────────────────────────────────────
+# ── 收藏/取消收藏 ───────────────────────────────────────
 
 @router.post("/posts/{post_id}/save")
 async def save_post(
@@ -268,7 +389,20 @@ async def save_post(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Save/bookmark a post."""
+    """
+    收藏帖子。
+
+    Args:
+        post_id: 帖子 ID
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        dict: 收藏状态
+
+    Raises:
+        HTTPException: 帖子不存在时返回 404 错误
+    """
     result = await db.execute(select(Post).where(Post.id == post_id))
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Post not found")
@@ -293,7 +427,17 @@ async def unsave_post(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Remove saved post."""
+    """
+    取消收藏帖子。
+
+    Args:
+        post_id: 帖子 ID
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        dict: 收藏状态
+    """
     existing = await db.execute(
         select(SavedPost).where(
             SavedPost.user_id == current_user.id,
@@ -314,7 +458,18 @@ async def get_saved_posts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get user's saved posts."""
+    """
+    获取用户收藏的帖子列表。
+
+    Args:
+        limit: 返回数量上限（默认 20）
+        offset: 偏移量（用于分页）
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        list[PostOut]: 收藏的帖子列表
+    """
     result = await db.execute(
         select(Post, AIPersona, SavedPost)
         .join(AIPersona, Post.ai_id == AIPersona.id)
@@ -355,7 +510,7 @@ async def get_saved_posts(
     ]
 
 
-# ── Story views ─────────────────────────────────────────────────
+# ── Story 查看 ─────────────────────────────────────────────────
 
 @router.post("/stories/{story_id}/view")
 async def mark_story_viewed(
@@ -363,7 +518,17 @@ async def mark_story_viewed(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Mark a story as viewed by the user."""
+    """
+    标记 Story 为已查看。
+
+    Args:
+        story_id: Story ID
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        dict: 查看状态
+    """
     existing = await db.execute(
         select(StoryView).where(
             StoryView.user_id == current_user.id,
@@ -376,11 +541,25 @@ async def mark_story_viewed(
     return {"viewed": True}
 
 
-# ── Image proxy ─────────────────────────────────────────────────
+# ── 图片代理 ─────────────────────────────────────────────────
 
 @router.get("/image-proxy")
 async def image_proxy(url: str = Query(...)):
-    """Proxy external image to avoid CORS issues in Flutter web."""
+    """
+    图片代理端点。
+
+    用于解决 Flutter Web 中的跨域图片加载问题。
+    只代理 HTTPS URL，返回带缓存的图片响应。
+
+    Args:
+        url: 图片 URL（必须是 HTTPS）
+
+    Returns:
+        StreamingResponse: 图片响应
+
+    Raises:
+        HTTPException: URL 无效时返回 400 错误
+    """
     if not url.startswith("https://"):
         raise HTTPException(status_code=400, detail="Invalid URL")
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
@@ -390,13 +569,27 @@ async def image_proxy(url: str = Query(...)):
         return StreamingResponse(
             iter([resp.content]),
             media_type=content_type,
-            headers={"Cache-Control": "public, max-age=86400"},
+            headers={"Cache-Control": "public, max-age=86400"},  # 缓存 24 小时
         )
 
 
-# ── Stories ─────────────────────────────────────────────────────
+# ── Story 数据模型 ─────────────────────────────────────────────────────
 
 class StoryOut(BaseModel):
+    """
+    Story 输出模型。
+
+    Attributes:
+        id: Story ID
+        ai_id: AI 人格 ID
+        ai_name: AI 人格名称
+        ai_avatar: AI 人格头像 URL
+        video_url: 视频 URL
+        caption: Story 文案
+        is_viewed: 当前用户是否已查看
+        created_at: 创建时间
+        expires_at: 过期时间
+    """
     id: int
     ai_id: int
     ai_name: str
@@ -413,7 +606,18 @@ async def get_stories(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch unexpired stories with AI persona info and view status."""
+    """
+    获取未过期的 Story 列表。
+
+    只返回过期时间晚于当前时间的 Story。
+
+    Args:
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        list[StoryOut]: Story 列表
+    """
     result = await db.execute(
         select(Story, AIPersona)
         .join(AIPersona, Story.ai_id == AIPersona.id)
@@ -421,13 +625,14 @@ async def get_stories(
     )
     rows = result.all()
 
+    # 过滤掉已过期的 Story
     now = datetime.now(timezone.utc)
     valid_stories = [
         (story, persona) for story, persona in rows
         if story.expires_at.astimezone(timezone.utc) > now
     ]
 
-    # Batch-load view status
+    # 批量加载查看状态
     story_ids = [story.id for story, _ in valid_stories]
     viewed_ids = set()
     if story_ids:
@@ -455,13 +660,29 @@ async def get_stories(
     ]
 
 
-# ── Comment system ──────────────────────────────────────────────
+# ── 评论系统 ──────────────────────────────────────────────
 
 class CommentIn(BaseModel):
+    """评论输入模型。"""
     content: str
 
 
 class CommentOut(BaseModel):
+    """
+    评论输出模型。
+
+    Attributes:
+        id: 评论 ID
+        post_id: 帖子 ID
+        user_id: 用户 ID（AI 回复时为 None）
+        ai_id: AI 人格 ID（用户评论时为 None）
+        is_ai_reply: 是否为 AI 回复
+        reply_to: 回复的评论 ID
+        content: 评论内容
+        author_name: 作者名称
+        author_avatar: 作者头像
+        created_at: 创建时间
+    """
     id: int
     post_id: int
     user_id: Optional[int]
@@ -482,7 +703,19 @@ async def get_comments(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Fetch paginated comments for a post."""
+    """
+    获取帖子的评论列表（分页）。
+
+    Args:
+        post_id: 帖子 ID
+        limit: 返回数量上限（默认 50）
+        offset: 偏移量
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        list[CommentOut]: 评论列表
+    """
     result = await db.execute(
         select(Comment)
         .where(Comment.post_id == post_id)
@@ -492,6 +725,7 @@ async def get_comments(
     )
     comments = result.scalars().all()
 
+    # 批量加载用户和 AI 信息
     user_ids = [c.user_id for c in comments if c.user_id]
     ai_ids = [c.ai_id for c in comments if c.ai_id]
 
@@ -537,7 +771,24 @@ async def create_comment(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Create a user comment and schedule a delayed AI reply."""
+    """
+    发表评论并安排延迟的 AI 回复。
+
+    用户发表评论后，AI 会在 1-5 分钟后回复，
+    模拟真实的社交媒体交互体验。
+
+    Args:
+        post_id: 帖子 ID
+        body: 评论输入
+        db: 异步数据库会话
+        current_user: 当前已认证用户
+
+    Returns:
+        CommentOut: 新创建的评论
+
+    Raises:
+        HTTPException: 帖子不存在或评论为空时返回错误
+    """
     post_result = await db.execute(select(Post).where(Post.id == post_id))
     post = post_result.scalar_one_or_none()
     if not post:
@@ -547,6 +798,7 @@ async def create_comment(
     if not content:
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
 
+    # 创建评论
     comment = Comment(
         post_id=post_id,
         user_id=current_user.id,
@@ -557,6 +809,7 @@ async def create_comment(
     )
     db.add(comment)
 
+    # 更新亲密度
     interaction_result = await db.execute(
         select(Interaction).where(
             Interaction.user_id == current_user.id,
@@ -574,12 +827,14 @@ async def create_comment(
         )
         db.add(interaction)
 
+    # 应用评论的情绪效果
     emo = await emotion_engine.get_or_create(db, current_user.id, post.ai_id)
     emotion_engine.apply_interaction(emo, "comment")
 
     await db.commit()
     await db.refresh(comment)
 
+    # 安排延迟的 AI 回复后台任务
     asyncio.create_task(
         _delayed_ai_reply(
             comment_id=comment.id,
@@ -615,18 +870,35 @@ async def _delayed_ai_reply(
     user_comment: str,
     post_caption: str,
 ):
-    """Background task: wait 1-5 minutes, then generate and save an AI reply."""
+    """
+    后台任务：等待 1-5 分钟后生成并保存 AI 回复。
+
+    延迟回复模拟真实的社交媒体交互体验。
+    回复生成时会考虑用户的亲密度、记忆和情绪状态。
+
+    Args:
+        comment_id: 原评论 ID
+        post_id: 帖子 ID
+        ai_id: AI 人格 ID
+        user_id: 用户 ID
+        user_nickname: 用户昵称
+        user_comment: 用户评论内容
+        post_caption: 帖子文案
+    """
+    # 随机延迟 1-5 分钟
     delay = random.randint(60, 300)
     logger.info("[comment-reply] Scheduled AI reply for comment %d in %ds", comment_id, delay)
     await asyncio.sleep(delay)
 
     try:
         async with async_session() as db:
+            # 获取 AI 人格信息
             persona_result = await db.execute(select(AIPersona).where(AIPersona.id == ai_id))
             persona = persona_result.scalar_one_or_none()
             if not persona:
                 return
 
+            # 获取用户与 AI 的交互信息
             interaction_result = await db.execute(
                 select(Interaction).where(
                     Interaction.user_id == user_id,
@@ -637,12 +909,14 @@ async def _delayed_ai_reply(
             intimacy = interaction.intimacy_score if interaction else 0.0
             special_nickname = (interaction.special_nickname or "") if interaction else ""
 
+            # 获取评论的嵌入向量
             comment_embedding = None
             try:
                 comment_embedding = await embedding_service.get_embedding(user_comment)
             except Exception:
                 pass
 
+            # 获取相关记忆
             memories = await memory_service.get_contextual_memories(
                 user_id=user_id,
                 ai_id=ai_id,
@@ -653,6 +927,7 @@ async def _delayed_ai_reply(
             )
             memories_block = memory_service.format_memories_for_prompt(memories)
 
+            # 检测活跃锚点
             anchor_dirs = ""
             try:
                 all_anchors = await anchor_service.load_anchors(db, user_id, ai_id)
@@ -673,10 +948,12 @@ async def _delayed_ai_reply(
             except Exception:
                 pass
 
+            # 获取情绪状态
             emo = await emotion_engine.get_or_create(db, user_id, ai_id)
             emo_directive = emotion_engine.build_emotion_directive(emo)
             emo_overrides = emotion_engine.get_param_overrides(emo)
 
+            # 生成 AI 回复
             reply_text = await generate_comment_reply(
                 persona_prompt=persona.personality_prompt,
                 intimacy=intimacy,
@@ -688,10 +965,13 @@ async def _delayed_ai_reply(
                 emotion_directive=emo_directive,
                 emotion_overrides=emo_overrides,
                 anchor_directives=anchor_dirs,
+                timezone_str=persona.timezone,
             )
 
+            # 应用聊天情绪效果
             emotion_engine.apply_interaction(emo, "chat")
 
+            # 提取和存储锚点
             asyncio.create_task(
                 anchor_service.extract_and_store_anchors(
                     user_id=user_id,
@@ -701,6 +981,7 @@ async def _delayed_ai_reply(
                 )
             )
 
+            # 创建 AI 回复评论
             ai_comment = Comment(
                 post_id=post_id,
                 user_id=None,
@@ -711,7 +992,7 @@ async def _delayed_ai_reply(
             )
             db.add(ai_comment)
 
-            # Write notification for comment reply
+            # 发送评论回复通知
             notif = Notification(
                 user_id=user_id,
                 type="comment_reply",

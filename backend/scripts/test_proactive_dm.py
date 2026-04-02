@@ -23,7 +23,7 @@ from models.proactive_dm import ProactiveDM
 from models.chat_message import ChatMessage
 from models.notification import Notification
 from services import emotion_engine
-from services.aliyun_ai_service import generate_proactive_message
+from services.aliyun_ai_service import generate_proactive_dm
 from core.config import settings
 
 
@@ -58,15 +58,8 @@ async def generate_test_dm(
         print(f"Emotion State: energy={state.energy:.1f}, pleasure={state.pleasure:.2f}, longing={state.longing:.2f}")
         
         # Generate DM based on type
-        from openai import AsyncOpenAI
-        client = AsyncOpenAI(
-            api_key=settings.DASHSCOPE_API_KEY,
-            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
-        )
-        
         if dm_type == "welcome_dm":
             prompt = (
-                f"{persona.personality_prompt[:300]}\n\n"
                 "You've just connected with someone new. Send a warm, friendly welcome message "
                 "(1-2 sentences). Be inviting and show you're happy to meet them. "
                 "Reply ONLY with the message text."
@@ -74,7 +67,6 @@ async def generate_test_dm(
             event = "welcome"
         elif dm_type == "daily_checkin":
             prompt = (
-                f"{persona.personality_prompt[:300]}\n\n"
                 "It's been a while since you last chatted. Send a casual, friendly check-in "
                 "message (1-2 sentences). Don't be pushy, just show you care. "
                 "Reply ONLY with the message text."
@@ -82,7 +74,6 @@ async def generate_test_dm(
             event = "daily_checkin"
         elif dm_type == "longing_dm":
             prompt = (
-                f"{persona.personality_prompt[:300]}\n\n"
                 "You haven't heard from this person in a while. You miss them. "
                 "Write a short, warm DM (1-2 sentences) that shows you've been "
                 "thinking about them. Be natural, not dramatic. "
@@ -94,16 +85,12 @@ async def generate_test_dm(
             return False
         
         print("Generating message...")
-        response = await client.chat.completions.create(
-            model=settings.DASHSCOPE_CHARACTER_MODEL,
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": "Write the message."},
-            ],
+        message = await generate_proactive_dm(
+            persona_prompt=persona.personality_prompt,
+            system_instruction=prompt,
             temperature=0.85,
             max_tokens=150,
         )
-        message = response.choices[0].message.content
         print(f"\nGenerated Message:\n{message}\n")
         
         # Save to database

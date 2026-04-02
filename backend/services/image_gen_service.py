@@ -1,12 +1,20 @@
-"""DashScope AI image generation service (Wanx model).
+"""
+SoulPulse 图片生成服务模块
 
-Generates Instagram-style lifestyle photos for AI persona posts.
-Uses the DashScope HTTP API for async image synthesis tasks.
+基于阿里云 DashScope 万象模型的图片生成服务。
+支持 wan2.6+ 新版 API 和旧版 API (text2image)。
 
-Features:
-- Standard text-to-image generation
-- Face reference for consistent character appearance
-- Deterministic seed per persona for style consistency
+wan2.6+ 官方端点规范:
+  - 同步: POST /services/aigc/multimodal-generation/generation
+  - 异步: POST /services/aigc/image-generation/generation (Header: X-DashScope-Async: enable)
+  - 任务查询: GET /tasks/{task_id}
+
+旧版 (wan2.5 及以下):
+  - 仅异步: POST /services/aigc/text2image/image-synthesis (Header: X-DashScope-Async: enable)
+
+参考文档:
+  - 万相-文生图 V2 API: https://help.aliyun.com/zh/model-studio/text-to-image-v2-api-reference
+  - 万相-图像生成与编辑 API: https://help.aliyun.com/zh/model-studio/wan-image-generation-api-reference
 """
 
 import asyncio
@@ -18,42 +26,166 @@ import httpx
 
 from core.config import settings
 
-_DASHSCOPE_IMAGE_URL = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text2image/image-synthesis"
-_DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks/{task_id}"
+# ── DashScope API 端点 ──────────────────────────────────────────
+_BASE = "https://dashscope.aliyuncs.com/api/v1"
 
+# wan2.6+ 同步端点
+_URL_SYNC = f"{_BASE}/services/aigc/multimodal-generation/generation"
+# wan2.6+ 异步端点 (与同步端点不同!)
+_URL_ASYNC_NEW = f"{_BASE}/services/aigc/image-generation/generation"
+# 旧版异步端点 (wan2.5 及以下)
+_URL_ASYNC_LEGACY = f"{_BASE}/services/aigc/text2image/image-synthesis"
+# 异步任务查询端点
+_URL_TASK = f"{_BASE}/tasks/{{task_id}}"
+
+# 使用新版 API 的模型前缀
+_NEW_API_PREFIXES = ("wan2.6", "wan2.7", "wan2.8", "wan2.9", "wan3")
+
+# 本地静态文件存储目录
 _STATIC_DIR = Path(__file__).parent.parent / "static" / "posts"
 
-# Default negative prompt for quality protection
-DEFAULT_NEGATIVE_PROMPT = (
-    "worst quality, low quality, deformed face, bad anatomy, "
-    "blurry, out of focus, ugly, duplicate, morbid, mutilated, "
-    "extra fingers, poorly drawn hands, poorly drawn face, mutation"
+# ── 强制质量保护 ──────────────────────────────────────────
+ENFORCED_NEGATIVE_PROMPT = (
+    "worst quality, low quality, deformed face, bad anatomy, blurry, "
+    "out of focus, ugly, duplicate, morbid, mutilated, extra fingers, "
+    "poorly drawn hands, poorly drawn face, mutation, deformed body, "
+    "mutated limbs, extra limbs, missing limbs, floating objects, "
+    "disfigured, gross proportions, malformed, bad eyes, crossed eyes, "
+    "long neck, bad teeth, distorted mouth, asymmetrical face, "
+    "low resolution, pixelated, noise, grainy, watermark, text, signature"
 )
+
+QUALITY_SUFFIX = (
+    "cinematic lighting, f/1.8, 85mm lens, high-end fashion photography, "
+    "professional color grading, 8k resolution, photorealistic, sharp details"
+)
+
+DEFAULT_NEGATIVE_PROMPT = ENFORCED_NEGATIVE_PROMPT
+
+# ── 内部工具函数 ──────────────────────────────────────────
+
+
+def _is_new_api(model: str) -> bool:
+    return any(model.startswith(p) for p in _NEW_API_PREFIXES)
 
 
 def _get_persona_seed(persona_id: int) -> int:
-    """Generate deterministic seed from persona ID for consistent image style.
-
-    Same persona_id always produces the same seed, ensuring visual consistency
-    across different generated images for the same character.
-
-    Args:
-        persona_id: The AI persona's unique identifier.
-
-    Returns:
-        Integer seed for image generation API.
-    """
-    # Use MD5 hash of persona_id to create a stable, unique seed
     hex_hash = hashlib.md5(f"persona_{persona_id}".encode()).hexdigest()[:8]
-    return int(hex_hash, 16)
+    return int(hex_hash, 16) % 2147483647
 
 
-def _headers() -> dict:
+def _auth_headers() -> dict[str, str]:
     return {
         "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
         "Content-Type": "application/json",
-        "X-DashScope-Async": "enable",
     }
+
+
+def _resolve_public_url(path: str) -> str:
+    """Convert a local path like /static/posts/xxx.png to a full public URL."""
+    if path.startswith(("http://", "https://")):
+        return path
+    return f"{settings.PUBLIC_URL.rstrip('/')}{path}"
+
+
+def _extract_image_urls(data: dict) -> list[str]:
+    """从新版 (choices) 或旧版 (results) 响应格式中提取图片 URL。"""
+    output = data.get("output", {})
+
+    # 新版: output.choices[].message.content[].image
+    for choice in output.get("choices", []):
+        content = choice.get("message", {}).get("content", [])
+        urls = [
+            item["image"]
+            for item in content
+            if isinstance(item, dict) and "image" in item
+        ]
+        if urls:
+            return urls
+
+    # 旧版: output.results[].url
+    results = output.get("results", [])
+    if results:
+        return [r["url"] for r in results if r.get("url")]
+
+    return []
+
+
+# ── 请求提交与轮询 ──────────────────────────────────────────
+
+
+async def _call_sync(url: str, payload: dict) -> list[str]:
+    """wan2.6+ 同步调用: 单次 POST 等待结果返回。"""
+    headers = _auth_headers()
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+    urls = _extract_image_urls(data)
+    if urls:
+        return urls
+    raise RuntimeError(f"No images in sync response: {data}")
+
+
+async def _call_async(url: str, payload: dict) -> list[str]:
+    """异步调用: POST 创建任务 → 轮询直到完成。"""
+    headers = _auth_headers()
+    headers["X-DashScope-Async"] = "enable"
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+
+        task_id = data.get("output", {}).get("task_id")
+        if not task_id:
+            # 某些情况下即使走异步端点也可能直接返回结果
+            urls = _extract_image_urls(data)
+            if urls:
+                return urls
+            raise RuntimeError(f"No task_id or images in response: {data}")
+
+        poll_url = _URL_TASK.format(task_id=task_id)
+        poll_headers = {"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}"}
+
+        for _ in range(60):
+            await asyncio.sleep(5)
+            poll_resp = await client.get(poll_url, headers=poll_headers)
+            poll_resp.raise_for_status()
+            poll_data = poll_resp.json()
+
+            status = poll_data.get("output", {}).get("task_status")
+            if status == "SUCCEEDED":
+                urls = _extract_image_urls(poll_data)
+                if urls:
+                    return urls
+                raise RuntimeError(f"Task succeeded but no images: {poll_data}")
+            elif status in ("FAILED", "UNKNOWN"):
+                msg = poll_data.get("output", {}).get("message", "Unknown error")
+                raise RuntimeError(f"Image generation failed: {msg}")
+
+    raise TimeoutError("Image generation timeout (5 min)")
+
+
+async def _generate(payload: dict, model: str) -> list[str]:
+    """根据模型版本选择正确的端点和调用方式。"""
+    if _is_new_api(model):
+        # wan2.6+ 优先使用异步端点 (不阻塞连接, 更可靠)
+        # 异步端点: image-generation/generation
+        try:
+            return await _call_async(_URL_ASYNC_NEW, payload)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                # 降级到同步端点
+                return await _call_sync(_URL_SYNC, payload)
+            raise
+    else:
+        # 旧版仅支持异步
+        return await _call_async(_URL_ASYNC_LEGACY, payload)
+
+
+# ── 公开 API ──────────────────────────────────────────
 
 
 async def generate_image(
@@ -63,90 +195,43 @@ async def generate_image(
     persona_id: int | None = None,
     negative_prompt: str | None = None,
 ) -> list[str]:
-    """Generate image(s) from a text prompt using DashScope Wanx model.
+    """从文本提示生成图片。自动根据模型名选择 API 格式。"""
+    full_prompt = f"{prompt}, {QUALITY_SUFFIX}"
+    model = settings.DASHSCOPE_IMAGE_MODEL
+    neg = negative_prompt or ENFORCED_NEGATIVE_PROMPT
 
-    Args:
-        prompt: Detailed text description of the image to generate.
-        size: Image dimensions, e.g. "1024*1024", "720*1280" (4:5 portrait).
-        n: Number of images to generate (1-4).
-        persona_id: AI persona ID for consistent image style (deterministic seed).
-        negative_prompt: Quality protection prompts. Optional.
+    if _is_new_api(model):
+        parameters: dict = {
+            "size": size,
+            "n": n,
+            "negative_prompt": neg,
+            "prompt_extend": False,
+            "watermark": False,
+        }
+        if persona_id is not None:
+            parameters["seed"] = _get_persona_seed(persona_id)
 
-    Returns:
-        List of image URLs.
-    """
-    parameters = {"size": size, "n": n}
+        payload = {
+            "model": model,
+            "input": {
+                "messages": [
+                    {"role": "user", "content": [{"text": full_prompt}]}
+                ]
+            },
+            "parameters": parameters,
+        }
+    else:
+        parameters = {"size": size, "n": n, "negative_prompt": neg}
+        if persona_id is not None:
+            parameters["seed"] = _get_persona_seed(persona_id)
 
-    # Add negative prompt for quality protection
-    if negative_prompt:
-        parameters["negative_prompt"] = negative_prompt
+        payload = {
+            "model": model,
+            "input": {"prompt": full_prompt},
+            "parameters": parameters,
+        }
 
-    # Add deterministic seed for persona consistency
-    if persona_id is not None:
-        parameters["seed"] = _get_persona_seed(persona_id)
-
-    payload = {
-        "model": settings.DASHSCOPE_IMAGE_MODEL,
-        "input": {"prompt": prompt},
-        "parameters": parameters,
-    }
-
-    async with httpx.AsyncClient(timeout=60) as client:
-        # Submit async task
-        resp = await client.post(_DASHSCOPE_IMAGE_URL, json=payload, headers=_headers())
-        resp.raise_for_status()
-        data = resp.json()
-
-        task_id = data.get("output", {}).get("task_id")
-        if not task_id:
-            raise RuntimeError(f"No task_id in response: {data}")
-
-        # Poll for result
-        poll_url = _DASHSCOPE_TASK_URL.format(task_id=task_id)
-        poll_headers = {"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}"}
-
-        for _ in range(60):  # max ~5 minutes
-            await asyncio.sleep(5)
-            poll_resp = await client.get(poll_url, headers=poll_headers)
-            poll_resp.raise_for_status()
-            poll_data = poll_resp.json()
-
-            status = poll_data.get("output", {}).get("task_status")
-            if status == "SUCCEEDED":
-                results = poll_data["output"].get("results", [])
-                return [r["url"] for r in results if r.get("url")]
-            elif status in ("FAILED", "UNKNOWN"):
-                msg = poll_data.get("output", {}).get("message", "Unknown error")
-                raise RuntimeError(f"Image generation failed: {msg}")
-            # else PENDING / RUNNING, keep polling
-
-        raise TimeoutError("Image generation timed out after 5 minutes")
-
-
-async def download_to_static(url: str, prefix: str = "post") -> str:
-    """Download a remote image to local /static/posts/ and return the relative path.
-
-    Args:
-        url: Remote image URL (e.g. Aliyun OSS temporary link).
-        prefix: Filename prefix for the saved file.
-
-    Returns:
-        Relative URL like '/static/posts/post_abc123.png'.
-    """
-    if not url:
-        return ""
-    _STATIC_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
-    filepath = _STATIC_DIR / filename
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            filepath.write_bytes(resp.content)
-        return f"/static/posts/{filename}"
-    except Exception as e:
-        print(f"[image_gen] Failed to download image: {e}")
-        return url  # fallback to original URL
+    return await _generate(payload, model)
 
 
 async def generate_image_with_face_ref(
@@ -157,82 +242,60 @@ async def generate_image_with_face_ref(
     persona_id: int | None = None,
     negative_prompt: str | None = None,
 ) -> list[str]:
-    """Generate image with face reference for consistent character appearance.
+    """带面部参考的图片生成, 保持角色视觉一致性。
 
-    This is the core of the Visual Identity (VI) system. It uses a base portrait
-    as a face reference to ensure all generated images have the same character face.
-
-    Args:
-        prompt: Scene/action description WITHOUT face details.
-                Example: "1boy, working out at gym, lifting weights, cinematic lighting"
-        face_ref_url: URL of the base portrait image (the "ID photo").
-        size: Image dimensions, default "720*1280" (4:5 portrait for Instagram).
-        n: Number of images to generate (1-4).
-        persona_id: AI persona ID for deterministic seed.
-        negative_prompt: Quality protection prompts. Uses DEFAULT_NEGATIVE_PROMPT if None.
-
-    Returns:
-        List of generated image URLs.
-
-    Example usage:
-        # Step 1: Character has a base_face_url stored in database
-        # Step 2: When generating post, only describe scene:
-        prompt = "1boy, sitting in a cozy cafe, reading a book, soft window light"
-        # Step 3: The face will match the base_face_url
+    wan2.6+: 在 content 数组中传入参考图 + enable_interleave=false (图像编辑模式)
+    旧版: 使用 ref_image + ref_mode 参数
     """
-    parameters = {
-        "size": size,
-        "n": n,
-        "negative_prompt": negative_prompt or DEFAULT_NEGATIVE_PROMPT,
-    }
+    full_prompt = f"{prompt}, {QUALITY_SUFFIX}"
+    model = settings.DASHSCOPE_IMAGE_MODEL
+    neg = negative_prompt or ENFORCED_NEGATIVE_PROMPT
+    resolved_face_url = _resolve_public_url(face_ref_url)
 
-    # Add deterministic seed for persona style consistency
-    if persona_id is not None:
-        parameters["seed"] = _get_persona_seed(persona_id)
+    if _is_new_api(model):
+        parameters: dict = {
+            "size": size,
+            "n": n,
+            "negative_prompt": neg,
+            "prompt_extend": False,
+            "watermark": False,
+            "enable_interleave": False,
+        }
+        if persona_id is not None:
+            parameters["seed"] = _get_persona_seed(persona_id)
 
-    # Build input with face reference
-    input_data = {
-        "prompt": prompt,
-        "ref_image": face_ref_url,
-        "ref_mode": "face_ref",  # Face reference mode
-        "ref_strength": 0.8,  # Weight for face similarity (0-1)
-    }
+        payload = {
+            "model": model,
+            "input": {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"text": full_prompt},
+                            {"image": resolved_face_url},
+                        ],
+                    }
+                ]
+            },
+            "parameters": parameters,
+        }
+    else:
+        parameters = {"size": size, "n": n, "negative_prompt": neg}
+        if persona_id is not None:
+            parameters["seed"] = _get_persona_seed(persona_id)
 
-    payload = {
-        "model": settings.DASHSCOPE_IMAGE_MODEL,
-        "input": input_data,
-        "parameters": parameters,
-    }
+        payload = {
+            "model": model,
+            "input": {
+                "prompt": full_prompt,
+                "ref_image": resolved_face_url,
+                "ref_mode": "face_ref",
+                "ref_strength": 0.8,
+            },
+            "parameters": parameters,
+        }
 
-    async with httpx.AsyncClient(timeout=60) as client:
-        # Submit async task
-        resp = await client.post(_DASHSCOPE_IMAGE_URL, json=payload, headers=_headers())
-        resp.raise_for_status()
-        data = resp.json()
-
-        task_id = data.get("output", {}).get("task_id")
-        if not task_id:
-            raise RuntimeError(f"No task_id in response: {data}")
-
-        # Poll for result
-        poll_url = _DASHSCOPE_TASK_URL.format(task_id=task_id)
-        poll_headers = {"Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}"}
-
-        for _ in range(60):  # max ~5 minutes
-            await asyncio.sleep(5)
-            poll_resp = await client.get(poll_url, headers=poll_headers)
-            poll_resp.raise_for_status()
-            poll_data = poll_resp.json()
-
-            status = poll_data.get("output", {}).get("task_status")
-            if status == "SUCCEEDED":
-                results = poll_data["output"].get("results", [])
-                return [r["url"] for r in results if r.get("url")]
-            elif status in ("FAILED", "UNKNOWN"):
-                msg = poll_data.get("output", {}).get("message", "Unknown error")
-                raise RuntimeError(f"Image generation failed: {msg}")
-
-        raise TimeoutError("Image generation timed out after 5 minutes")
+    return await _generate(payload, model)
 
 
 async def generate_base_portrait(
@@ -240,23 +303,9 @@ async def generate_base_portrait(
     gender: str = "male",
     style: str = "photorealistic",
 ) -> str:
-    """Generate a high-quality base portrait for a character.
-
-    This creates the "ID photo" that will be used for all subsequent
-    image generations to maintain face consistency.
-
-    Args:
-        visual_prompt_tags: Fixed visual traits.
-            Example: "silver hair, sharp jawline, deep blue eyes"
-        gender: Character gender ("male" or "female").
-        style: Visual style ("photorealistic", "anime", etc.)
-
-    Returns:
-        URL of the generated base portrait.
-    """
+    """生成基础肖像图, 用于角色视觉一致性系统。"""
     gender_tag = "1boy" if gender == "male" else "1girl"
 
-    # Build high-quality portrait prompt
     prompt = (
         f"Masterpiece, best quality, 8k, {style}, {gender_tag}, "
         f"{visual_prompt_tags}, "
@@ -273,9 +322,27 @@ async def generate_base_portrait(
 
     urls = await generate_image(
         prompt=prompt,
-        size="1024*1024",  # Square for portrait
+        size="1024*1024",
         n=1,
         negative_prompt=negative,
     )
 
     return urls[0] if urls else ""
+
+
+async def download_to_static(url: str, prefix: str = "post") -> str:
+    """下载远程图片到本地 static 目录。URL 24h 过期, 必须及时下载。"""
+    if not url:
+        return ""
+    _STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{prefix}_{uuid.uuid4().hex[:12]}.png"
+    filepath = _STATIC_DIR / filename
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            filepath.write_bytes(resp.content)
+        return f"/static/posts/{filename}"
+    except Exception as e:
+        print(f"[image_gen] Download failed: {e}")
+        return url

@@ -1,7 +1,35 @@
-"""Chat service: message persistence, history, context window, and summary generation.
+"""
+聊天服务模块：消息持久化、历史记录、上下文窗口与摘要生成
 
-Core orchestration layer for the chat system. All chat flows (REST POST,
-WebSocket receive) delegate to handle_user_message() for consistent behavior.
+================================================================================
+功能概述
+================================================================================
+本模块是 SoulPulse 聊天系统的核心编排层，负责协调所有聊天相关操作：
+- 消息持久化：将用户消息和 AI 回复保存到数据库
+- 历史记录检索：支持分页和游标分页的消息历史查询
+- 上下文窗口构建：整合摘要和最近消息，供 LLM 使用
+- 滚动摘要生成：当未摘要消息达到阈值时自动触发后台摘要任务
+- 完整聊天流程：handle_user_message() 是所有聊天入口的唯一编排函数
+
+================================================================================
+设计理念
+================================================================================
+1. 单一入口原则：REST POST 和 WebSocket 接收都委托给 handle_user_message()，
+   确保行为一致性，避免逻辑分散。
+2. Fire-and-forget 后台任务：摘要生成、记忆提取、锚点提取等异步任务
+   不阻塞主流程，提升响应速度。
+3. 游标分页：使用消息 ID 作为游标，避免时间戳分页的边界问题。
+4. 亲密度驱动：回复生成、记忆访问等都受亲密度等级影响。
+
+================================================================================
+主要组件
+================================================================================
+- ChatResult: 聊天结果数据类，包含回复、消息ID、亲密度、昵称提案等
+- persist_message(): 消息持久化函数
+- get_history(): 历史记录检索函数（支持游标分页）
+- build_context_window(): 上下文窗口构建函数
+- maybe_generate_summary(): 滚动摘要生成后台任务
+- handle_user_message(): 主聊天编排函数（核心入口）
 """
 
 from __future__ import annotations
@@ -31,28 +59,38 @@ from services import (
 
 logger = logging.getLogger(__name__)
 
-# Summary generation: trigger after this many unsummarized messages
+# 摘要生成阈值：当未摘要消息数达到此值时触发摘要生成
 _SUMMARY_THRESHOLD = 10
 
-# Number of recent raw messages passed to LLM as chat_history
+# 上下文窗口中最近消息数量：传递给 LLM 作为 chat_history 的消息数
 _CONTEXT_RECENT_COUNT = 5
 
 
-# ── Result type ─────────────────────────────────────────────────
+# ── 结果类型定义 ─────────────────────────────────────────────────
 
 @dataclass
 class ChatResult:
-    """Return value from handle_user_message."""
+    """
+    聊天处理结果数据类。
 
-    reply: str
-    user_message_id: int
-    ai_message_id: int
-    intimacy: float
-    nickname_proposal: dict | None = field(default=None)
-    emotion_hint: dict | None = field(default=None)
+    包含 handle_user_message() 函数的所有返回信息：
+    - reply: AI 生成的回复文本
+    - user_message_id: 用户消息的数据库 ID
+    - ai_message_id: AI 回复消息的数据库 ID
+    - intimacy: 更新后的亲密度分数 (0-10)
+    - nickname_proposal: 昵称提案（当亲密度跨越等级 6 时触发）
+    - emotion_hint: 情绪提示信息（供前端 UI 使用）
+    """
+
+    reply: str                          # AI 回复文本
+    user_message_id: int                # 用户消息 ID
+    ai_message_id: int                  # AI 消息 ID
+    intimacy: float                     # 更新后的亲密度分数
+    nickname_proposal: dict | None = field(default=None)   # 昵称提案（可选）
+    emotion_hint: dict | None = field(default=None)        # 情绪提示（可选）
 
 
-# ── Message persistence ─────────────────────────────────────────
+# ── 消息持久化 ─────────────────────────────────────────
 
 async def persist_message(
     db: AsyncSession,
@@ -65,7 +103,23 @@ async def persist_message(
     post_context: str | None = None,
     delivered: int = 1,
 ) -> ChatMessage:
-    """Persist a single chat message and return it with its assigned id."""
+    """
+    持久化单条聊天消息并返回带有 ID 的消息对象。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+        role: 消息角色 ("user" 或 "assistant")
+        content: 消息内容
+        message_type: 消息类型（默认 "chat"，也可能是 "proactive_dm"）
+        event: 事件类型（可选）
+        post_context: 帖子上下文（可选，用于帖子相关聊天）
+        delivered: 是否已投递（默认 1，主动私信为 0）
+
+    Returns:
+        ChatMessage: 带有数据库分配 ID 的消息对象
+    """
     msg = ChatMessage(
         user_id=user_id,
         ai_id=ai_id,
@@ -77,11 +131,11 @@ async def persist_message(
         delivered=delivered,
     )
     db.add(msg)
-    await db.flush()  # assigns id without committing the transaction
+    await db.flush()  # 分配 ID 但不提交事务，允许后续操作在同一事务中完成
     return msg
 
 
-# ── History retrieval ───────────────────────────────────────────
+# ── 历史记录检索 ───────────────────────────────────────────
 
 async def get_history(
     db: AsyncSession,
@@ -90,10 +144,21 @@ async def get_history(
     limit: int = 30,
     before_id: int | None = None,
 ) -> list[ChatMessage]:
-    """Return messages for a user-AI pair, oldest first.
+    """
+    获取用户与 AI 之间的聊天历史，按时间升序排列（最旧在前）。
 
-    Cursor-paginated: if before_id is given, only return messages with
-    id < before_id.  Results are in ascending id order (oldest first).
+    使用游标分页：如果指定了 before_id，只返回 ID 小于该值的消息。
+    这种分页方式避免了时间戳分页可能出现的边界问题。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+        limit: 返回消息数量上限（默认 30）
+        before_id: 游标 ID，用于获取更早的消息（可选）
+
+    Returns:
+        list[ChatMessage]: 消息列表，按 ID 升序排列
     """
     stmt = (
         select(ChatMessage)
@@ -105,18 +170,31 @@ async def get_history(
 
     result = await db.execute(stmt)
     messages = list(result.scalars().all())
-    messages.reverse()  # oldest first for display
+    messages.reverse()  # 反转列表，使最旧的消息排在前面，便于显示
     return messages
 
 
-# ── Undelivered proactive DMs ───────────────────────────────────
+# ── 未投递的主动私信 ───────────────────────────────────
 
 async def get_undelivered_dms(
     db: AsyncSession,
     user_id: int,
     ai_id: int,
 ) -> list[ChatMessage]:
-    """Return proactive DMs not yet delivered, oldest first."""
+    """
+    获取尚未投递的主动私信，按时间升序排列。
+
+    主动私信（proactive_dm）是 AI 主动发给用户的消息，
+    当用户尚未查看时 delivered 字段为 0。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+
+    Returns:
+        list[ChatMessage]: 未投递的主动私信列表
+    """
     stmt = (
         select(ChatMessage)
         .where(
@@ -135,7 +213,13 @@ async def mark_delivered(
     db: AsyncSession,
     message_ids: list[int],
 ) -> None:
-    """Mark given message IDs as delivered."""
+    """
+    将指定消息标记为已投递。
+
+    Args:
+        db: 异步数据库会话
+        message_ids: 需要标记的消息 ID 列表
+    """
     if not message_ids:
         return
     stmt = select(ChatMessage).where(ChatMessage.id.in_(message_ids))
@@ -145,24 +229,34 @@ async def mark_delivered(
     await db.flush()
 
 
-# ── Context window construction ─────────────────────────────────
+# ── 上下文窗口构建 ─────────────────────────────────
 
 async def build_context_window(
     db: AsyncSession,
     user_id: int,
     ai_id: int,
 ) -> tuple[str, list[dict]]:
-    """Build the context window for LLM consumption.
+    """
+    构建 LLM 使用的上下文窗口。
+
+    上下文窗口包含两部分：
+    1. conversation_summary: 最新的滚动摘要文本
+    2. recent_messages: 最近 N 条消息（作为 chat_history）
+
+    重要：必须在持久化当前用户消息之前调用此函数，
+    这样窗口中只包含之前的对话历史，避免包含当前正在处理的消息。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
 
     Returns:
-        (conversation_summary, recent_messages)
-        - conversation_summary: latest rolling summary text, or ""
-        - recent_messages: last N messages as [{"role": ..., "content": ...}]
-
-    NOTE: Call this BEFORE persisting the current user message so the
-    window contains only prior conversation history.
+        tuple[str, list[dict]]: (摘要文本, 最近消息列表)
+        - 摘要文本为空字符串如果没有摘要
+        - 最近消息格式为 [{"role": ..., "content": ...}]
     """
-    # Latest summary
+    # 获取最新的摘要
     summary_text = ""
     summary_stmt = (
         select(ChatSummary)
@@ -175,7 +269,7 @@ async def build_context_window(
     if latest_summary:
         summary_text = latest_summary.content
 
-    # Last N messages (prior to the current turn)
+    # 获取最近 N 条消息（当前回合之前的消息）
     recent_stmt = (
         select(ChatMessage)
         .where(ChatMessage.user_id == user_id, ChatMessage.ai_id == ai_id)
@@ -184,7 +278,7 @@ async def build_context_window(
     )
     recent_result = await db.execute(recent_stmt)
     recent_msgs = list(recent_result.scalars().all())
-    recent_msgs.reverse()  # oldest first
+    recent_msgs.reverse()  # 反转，使最旧的消息排在前面
 
     recent_dicts = [
         {"role": m.role, "content": m.content}
@@ -194,8 +288,9 @@ async def build_context_window(
     return summary_text, recent_dicts
 
 
-# ── Summary generation (fire-and-forget) ────────────────────────
+# ── 摘要生成（后台任务）────────────────────────
 
+# 摘要生成的系统提示词，用于指导 LLM 生成对话摘要
 _SUMMARY_SYSTEM_PROMPT = """\
 You are a conversation summarizer. Given a previous summary (if any) and \
 recent conversation turns, produce an updated summary that captures key facts, \
@@ -205,14 +300,28 @@ Write in third person. Return ONLY the summary text, nothing else.\
 
 
 async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
-    """Generate a rolling summary if enough unsummarized messages exist.
+    """
+    滚动摘要生成函数（后台任务）。
 
-    Runs as a fire-and-forget background task with its own DB session.
-    Triggers when there are _SUMMARY_THRESHOLD+ unsummarized messages.
+    当未摘要的消息数量达到阈值（_SUMMARY_THRESHOLD）时触发摘要生成。
+    作为 fire-and-forget 后台任务运行，使用独立的数据库会话，
+    不阻塞主聊天流程。
+
+    摘要生成流程：
+    1. 查找最新的摘要记录，确定已摘要消息的范围
+    2. 统计未摘要消息数量，判断是否达到阈值
+    3. 如果达到阈值，获取所有未摘要消息
+    4. 构建 LLM 输入（包含之前的摘要和新对话）
+    5. 调用 LLM 生成新的摘要
+    6. 持久化摘要并标记相关消息
+
+    Args:
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
     """
     try:
         async with async_session() as db:
-            # Find latest summary
+            # 查找最新的摘要记录
             summary_stmt = (
                 select(ChatSummary)
                 .where(ChatSummary.user_id == user_id, ChatSummary.ai_id == ai_id)
@@ -228,7 +337,7 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
                 prev_summary_text = latest_summary.content
                 after_id = latest_summary.message_range_end
 
-            # Count unsummarized messages
+            # 统计未摘要的消息数量
             count_stmt = (
                 select(func.count())
                 .select_from(ChatMessage)
@@ -242,9 +351,9 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
             unsummarized_count = count_result.scalar() or 0
 
             if unsummarized_count < _SUMMARY_THRESHOLD:
-                return  # not enough messages yet
+                return  # 未达到阈值，不生成摘要
 
-            # Fetch unsummarized messages
+            # 获取所有未摘要的消息
             msgs_stmt = (
                 select(ChatMessage)
                 .where(
@@ -260,7 +369,7 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
             if not messages:
                 return
 
-            # Build conversation text for the LLM
+            # 构建对话文本供 LLM 使用
             turns = [f"{m.role.capitalize()}: {m.content}" for m in messages]
             conversation_text = "\n".join(turns)
 
@@ -274,7 +383,7 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
                 "Produce the updated summary."
             )
 
-            # Call LLM
+            # 调用 LLM 生成摘要
             client = _get_client()
             response = await client.chat.completions.create(
                 model=settings.DASHSCOPE_CHAT_MODEL,
@@ -287,7 +396,7 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
             )
             summary_content = response.choices[0].message.content.strip()
 
-            # Persist summary
+            # 持久化新的摘要记录
             new_summary = ChatSummary(
                 user_id=user_id,
                 ai_id=ai_id,
@@ -296,9 +405,9 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
                 message_range_end=messages[-1].id,
             )
             db.add(new_summary)
-            await db.flush()  # assigns new_summary.id
+            await db.flush()  # 分配 new_summary.id
 
-            # Tag messages with their summary group
+            # 将消息标记为属于该摘要组
             for m in messages:
                 m.summary_group = new_summary.id
 
@@ -315,7 +424,7 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
         )
 
 
-# ── Main chat orchestration ─────────────────────────────────────
+# ── 主聊天编排函数 ─────────────────────────────────────
 
 async def handle_user_message(
     db: AsyncSession,
@@ -324,14 +433,42 @@ async def handle_user_message(
     message: str,
     post_context: str | None = None,
 ) -> ChatResult:
-    """Process a user chat message end-to-end.
-
-    Shared by both the REST POST endpoint and the WebSocket receive path.
-    Handles: persona lookup, interaction upsert, emotion, embedding,
-    memories, anchors, context window, LLM call, intimacy update,
-    message persistence, and fire-and-forget background tasks.
     """
-    # ── 1. Persona ──────────────────────────────────────────────
+    处理用户聊天消息的完整流程（端到端编排）。
+
+    这是所有聊天入口的核心编排函数，REST POST 端点和 WebSocket 接收
+    都委托给此函数处理，确保行为一致性。
+
+    处理流程（17 个步骤）：
+    1. 查找 AI 人格信息
+    2. 获取或创建用户-AI 交互记录
+    3. 获取或创建情绪状态
+    4. 构建用户消息（可选帖子上下文）
+    5. 构建上下文窗口（摘要 + 最近消息）
+    6. 持久化用户消息
+    7. 计算消息嵌入向量（用于记忆和锚点检索）
+    8. 检索相关记忆
+    9. 检测活跃锚点
+    10. 构建情绪感知的提示上下文
+    11. 调用 AI 生成回复
+    12. 持久化 AI 回复
+    13. 更新亲密度分数
+    14. 应用情绪交互效果
+    15. 启动后台任务（记忆提取、锚点提取）
+    16. 启动摘要生成后台任务
+    17. 处理里程碑事件（昵称提案）
+
+    Args:
+        db: 异步数据库会话
+        user: 当前用户对象
+        ai_id: AI 人格 ID
+        message: 用户消息内容
+        post_context: 帖子上下文（可选，用于帖子相关聊天）
+
+    Returns:
+        ChatResult: 聊天处理结果，包含回复、消息ID、亲密度等信息
+    """
+    # ── 步骤 1: 查找 AI 人格 ──────────────────────────────────────────────
     persona_result = await db.execute(
         select(AIPersona).where(AIPersona.id == ai_id)
     )
@@ -339,7 +476,7 @@ async def handle_user_message(
     if not persona:
         raise ValueError(f"AI persona {ai_id} not found")
 
-    # ── 2. Interaction (get or create) ──────────────────────────
+    # ── 步骤 2: 获取或创建交互记录 ──────────────────────────
     interaction_result = await db.execute(
         select(Interaction).where(
             Interaction.user_id == user.id,
@@ -348,39 +485,41 @@ async def handle_user_message(
     )
     interaction = interaction_result.scalar_one_or_none()
     if not interaction:
+        # 如果不存在交互记录，创建新的记录，初始亲密度为 0
         interaction = Interaction(user_id=user.id, ai_id=ai_id, intimacy_score=0.0)
         db.add(interaction)
         await db.commit()
         await db.refresh(interaction)
 
-    # ── 3. Emotion state ────────────────────────────────────────
+    # ── 步骤 3: 获取情绪状态 ────────────────────────────────────────
     emotion_state = await emotion_engine.get_or_create(db, user.id, ai_id)
     event_type = emotion_engine.classify_chat_event(message)
 
-    # ── 4. Build user message with optional post context ────────
+    # ── 步骤 4: 构建用户消息（可选帖子上下文）────────────────
     user_message = message
     if post_context:
+        # 如果有帖子上下文，将其附加到消息中
         user_message = f"[Regarding this post: {post_context}]\n{message}"
 
-    # ── 5. Context window (BEFORE persisting current message) ───
+    # ── 步骤 5: 构建上下文窗口（在持久化当前消息之前）──────────
     conversation_summary, chat_history = await build_context_window(
         db, user.id, ai_id,
     )
 
-    # ── 6. Persist user message ─────────────────────────────────
+    # ── 步骤 6: 持久化用户消息 ─────────────────────────────────
     user_msg = await persist_message(
         db, user.id, ai_id, "user", message,
         post_context=post_context,
     )
 
-    # ── 7. Compute embedding (reused for memories + anchors) ────
+    # ── 步骤 7: 计算消息嵌入向量（用于记忆和锚点检索）────────
     query_embedding = None
     try:
         query_embedding = await embedding_service.get_embedding(user_message)
     except Exception:
         logger.warning("Embedding computation failed", exc_info=True)
 
-    # ── 8. Retrieve contextual memories ─────────────────────────
+    # ── 步骤 8: 检索相关记忆 ─────────────────────────
     memories_block = ""
     try:
         memories = await memory_service.get_contextual_memories(
@@ -394,7 +533,7 @@ async def handle_user_message(
     except Exception:
         logger.warning("Memory retrieval failed", exc_info=True)
 
-    # ── 9. Anchor detection ─────────────────────────────────────
+    # ── 步骤 9: 检测活跃锚点 ─────────────────────────────────────
     anchor_directives = ""
     active_anchors: list = []
     try:
@@ -410,11 +549,11 @@ async def handle_user_message(
     except Exception:
         logger.warning("Anchor detection failed", exc_info=True)
 
-    # ── 10. Emotion-aware prompt context ────────────────────────
+    # ── 步骤 10: 构建情绪感知的提示上下文 ────────────────────────
     emotion_directive = emotion_engine.build_emotion_directive(emotion_state)
     emotion_overrides = emotion_engine.get_param_overrides(emotion_state)
 
-    # ── 11. Call AI ─────────────────────────────────────────────
+    # ── 步骤 11: 调用 AI 生成回复 ─────────────────────────────────────────────
     try:
         reply = await chat_with_ai(
             persona_prompt=persona.personality_prompt,
@@ -427,22 +566,24 @@ async def handle_user_message(
             emotion_overrides=emotion_overrides,
             anchor_directives=anchor_directives,
             conversation_summary=conversation_summary,
+            timezone_str=persona.timezone,
         )
     except Exception:
+        # AI 服务不可用时的备用回复
         reply = (
             f"Hey! I'm {persona.name}. AI service is not configured yet "
             "— please set DASHSCOPE_API_KEY to enable real conversations."
         )
 
-    # ── 12. Persist AI reply ────────────────────────────────────
+    # ── 步骤 12: 持久化 AI 回复 ────────────────────────────────────
     ai_msg = await persist_message(db, user.id, ai_id, "assistant", reply)
 
-    # ── 13. Update intimacy ─────────────────────────────────────
+    # ── 步骤 13: 更新亲密度分数 ─────────────────────────────────────
     old_intimacy = interaction.intimacy_score
     interaction.intimacy_score = min(interaction.intimacy_score + 0.2, 10.0)
     interaction.last_chat_summary = f"User: {message[:100]} | AI: {reply[:100]}"
 
-    # ── 14. Apply emotion interaction ───────────────────────────
+    # ── 步骤 14: 应用情绪交互效果 ───────────────────────────
     emotion_engine.apply_interaction(emotion_state, event_type)
     e_hint = emotion_engine.build_emotion_hint(emotion_state)
 
@@ -450,7 +591,8 @@ async def handle_user_message(
 
     new_intimacy = interaction.intimacy_score
 
-    # ── 15. Fire-and-forget background tasks ────────────────────
+    # ── 步骤 15: 启动后台任务（记忆提取、锚点提取）───────────────────
+    # 后台任务不阻塞主流程，使用 fire-and-forget 模式
     asyncio.create_task(
         memory_service.extract_and_store_memories(
             user_id=user.id,
@@ -474,10 +616,11 @@ async def handle_user_message(
             )
         )
 
-    # ── 16. Summary generation (fire-and-forget) ────────────────
+    # ── 步骤 16: 启动摘要生成后台任务 ────────────────────────
     asyncio.create_task(maybe_generate_summary(user.id, ai_id))
 
-    # ── 17. Milestone: nickname proposal at Lv 6 crossing ───────
+    # ── 步骤 17: 处理里程碑事件（昵称提案）────────────────
+    # 当亲密度跨越等级 6 时，AI 会提议一个特殊昵称
     nickname_proposal = None
     if old_intimacy < 6.0 <= new_intimacy and not interaction.nickname_proposed:
         try:

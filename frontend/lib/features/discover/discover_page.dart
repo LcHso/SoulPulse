@@ -6,15 +6,20 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
 import '../../core/api/api_client.dart';
 
-final _personasProvider =
+/// Increment to force personasProvider to refetch.
+final personasRefreshProvider = StateProvider<int>((ref) => 0);
+
+final personasProvider =
     FutureProvider.family<List<dynamic>, ({String? category, String? query})>(
         (ref, params) async {
+  ref.watch(
+      personasRefreshProvider); // re-evaluate when refresh counter changes
   var path = '/api/ai/personas?';
   if (params.category != null) path += 'category=${params.category}&';
   if (params.query != null && params.query!.isNotEmpty) {
     path += 'q=${Uri.encodeComponent(params.query!)}&';
   }
-  final data = await ApiClient.get(path);
+  final data = await ApiClient.get(path, useCache: false);
   return (data['personas'] as List<dynamic>?) ?? [];
 });
 
@@ -39,7 +44,7 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
   @override
   Widget build(BuildContext context) {
     final params = (category: _selectedCategory, query: _searchQuery);
-    final personasAsync = ref.watch(_personasProvider(params));
+    final personasAsync = ref.watch(personasProvider(params));
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return Scaffold(
@@ -112,8 +117,7 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
                     Text('Failed to load',
                         style: GoogleFonts.inter(color: Colors.grey)),
                     TextButton(
-                      onPressed: () =>
-                          ref.invalidate(_personasProvider(params)),
+                      onPressed: () => ref.invalidate(personasProvider(params)),
                       child: const Text('Retry'),
                     ),
                   ],

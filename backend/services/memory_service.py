@@ -1,10 +1,39 @@
-"""Memory service: extraction, retrieval, and formatting.
+"""
+记忆服务模块：提取、检索与格式化
 
-Handles the lifecycle of AI companion memories:
-1. Extract memory fragments from conversations (via qwen-max)
-2. Store them in both SQLite (relational) and ChromaDB (vector)
-3. Retrieve relevant memories for context injection
-4. Format memories for system prompt injection
+================================================================================
+功能概述
+================================================================================
+本模块处理 AI 伴侣记忆的完整生命周期：
+1. 从对话中提取记忆片段（通过 qwen-max 模型）
+2. 将记忆存储到 SQLite（关系型）和 ChromaDB（向量数据库）
+3. 检索相关记忆用于上下文注入
+4. 格式化记忆用于系统提示词注入
+
+================================================================================
+设计理念
+================================================================================
+1. 双重存储架构：
+   - SQLite：关系型存储，支持结构化查询和事务
+   - ChromaDB：向量存储，支持语义相似度检索
+
+2. 亲密度门控：
+   - Lv 0-5：只能访问 "fact" 类型记忆（浅层：姓名、工作、爱好）
+   - Lv 6-10：可以访问 "fact" 和 "emotion" 类型记忆（深层：感受、历史）
+
+3. 记忆保真度层级：
+   - [fresh]（< 24小时）：精确回忆
+   - [fading]（1-7天）：模糊回忆，可能有些细节不准确
+   - [distant]（> 7天）：只记得核心感受
+
+4. Fire-and-forget 后台任务：记忆提取不阻塞主聊天流程
+
+================================================================================
+主要组件
+================================================================================
+- extract_and_store_memories(): 从对话中提取并存储记忆
+- get_contextual_memories(): 检索与当前对话相关的记忆
+- format_memories_for_prompt(): 格式化记忆用于系统提示词注入
 """
 
 from __future__ import annotations
@@ -24,7 +53,7 @@ from services.aliyun_ai_service import _get_client
 
 logger = logging.getLogger(__name__)
 
-# ── Extraction prompt ──────────────────────────────────────────
+# ── 记忆提取提示词 ──────────────────────────────────────────
 
 _EXTRACTION_SYSTEM_PROMPT = """\
 You are a memory extraction assistant. Analyze the following conversation \
@@ -52,15 +81,32 @@ async def extract_and_store_memories(
     user_message: str,
     ai_reply: str,
 ) -> None:
-    """Extract memory fragments from a conversation turn and store them.
+    """
+    从对话回合中提取记忆片段并存储。
 
-    Runs as a fire-and-forget background task. Creates its own DB session.
-    Never raises — logs errors instead.
+    作为 fire-and-forget 后台任务运行，使用独立的数据库会话。
+    永远不会抛出异常 —— 所有错误都会被记录日志。
+
+    记忆提取流程：
+    1. 调用 LLM 分析对话，提取关键事实和情感状态
+    2. 解析 LLM 返回的 JSON 数组
+    3. 批量生成记忆内容的嵌入向量
+    4. 将记忆存储到 ChromaDB（向量检索）和 SQLite（关系查询）
+
+    记忆类型：
+    - "fact"：具体信息（姓名、工作、爱好、地点、偏好、日程）
+    - "emotion"：情感状态（感受、情绪、个人困扰、情感事件、关系）
+
+    Args:
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+        user_message: 用户消息内容
+        ai_reply: AI 回复内容
     """
     try:
         client = _get_client()
         response = await client.chat.completions.create(
-            model=settings.DASHSCOPE_CHAT_MODEL,  # qwen-max
+            model=settings.DASHSCOPE_CHAT_MODEL,  # 使用 qwen-max 进行记忆提取
             messages=[
                 {"role": "system", "content": _EXTRACTION_SYSTEM_PROMPT},
                 {
@@ -71,14 +117,14 @@ async def extract_and_store_memories(
                     ),
                 },
             ],
-            temperature=0.3,
+            temperature=0.3,  # 较低温度，确保提取结果稳定
             max_tokens=500,
         )
         raw = response.choices[0].message.content.strip()
 
-        # Strip markdown fences if present
+        # 去除 Markdown 代码块标记（如果存在）
         if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1]  # remove first ``` line
+            raw = raw.split("\n", 1)[-1]  # 移除第一行 ``` 标记
             if raw.endswith("```"):
                 raw = raw[:-3]
             raw = raw.strip()
@@ -87,13 +133,13 @@ async def extract_and_store_memories(
         if not isinstance(fragments, list) or not fragments:
             return
 
-        # Generate embeddings in batch
+        # 批量生成嵌入向量
         contents = [f["content"] for f in fragments if f.get("content")]
         if not contents:
             return
         embeddings = await embedding_service.get_embeddings(contents)
 
-        # Store each fragment
+        # 存储每个记忆片段
         async with async_session() as db:
             for i, fragment in enumerate(fragments):
                 content = fragment.get("content", "")
@@ -105,7 +151,7 @@ async def extract_and_store_memories(
 
                 vid = uuid.uuid4().hex
 
-                # ChromaDB (sync, run in thread)
+                # 存储到 ChromaDB（同步操作，在线程中运行）
                 metadata = {
                     "user_id": str(user_id),
                     "ai_id": str(ai_id),
@@ -116,7 +162,7 @@ async def extract_and_store_memories(
                     vector_store.add_memory, vid, embeddings[i], content, metadata
                 )
 
-                # SQLite
+                # 存储到 SQLite
                 entry = MemoryEntry(
                     user_id=user_id,
                     ai_id=ai_id,
@@ -137,7 +183,7 @@ async def extract_and_store_memories(
         logger.exception("Memory extraction failed (user_id=%d ai_id=%d)", user_id, ai_id)
 
 
-# ── Retrieval ──────────────────────────────────────────────────
+# ── 记忆检索 ──────────────────────────────────────────────────
 
 async def get_contextual_memories(
     user_id: int,
@@ -147,24 +193,44 @@ async def get_contextual_memories(
     top_k: int = 5,
     precomputed_embedding: list[float] | None = None,
 ) -> list[dict]:
-    """Retrieve relevant memories for the current conversation context.
-
-    Intimacy gating:
-      - Lv 0-5: only "fact" memories (shallow: name, job, hobbies)
-      - Lv 6-10: both "fact" and "emotion" memories (deep: feelings, history)
-
-    Always filters by user_id — strict multi-tenant isolation.
-    Returns dicts with type, content, relevance, and age_hours for fidelity tiers.
     """
+    检索与当前对话上下文相关的记忆。
+
+    亲密度门控：
+      - Lv 0-5：只能访问 "fact" 类型记忆（浅层：姓名、工作、爱好）
+      - Lv 6-10：可以访问 "fact" 和 "emotion" 类型记忆（深层：感受、历史）
+
+    始终按 user_id 过滤 —— 严格的多租户隔离。
+    返回包含类型、内容、相关性和年龄（小时）的字典列表，用于保真度层级。
+
+    Args:
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+        query_text: 查询文本（用于语义相似度检索）
+        intimacy: 亲密度分数 (0-10)
+        top_k: 返回的记忆数量上限（默认 5）
+        precomputed_embedding: 预计算的嵌入向量（可选，避免重复计算）
+
+    Returns:
+        list[dict]: 记忆字典列表，每个字典包含：
+            - type: 记忆类型 ("fact" 或 "emotion")
+            - content: 记忆内容
+            - relevance: 相关性分数 (0-1)
+            - age_hours: 记忆年龄（小时）
+    """
+    # 获取查询嵌入向量
     embedding = precomputed_embedding or await embedding_service.get_embedding(query_text)
 
+    # 根据亲密度确定可访问的记忆类型
     memory_types: Optional[list[str]] = ["fact"] if intimacy < 6 else None
 
+    # 在线程中执行向量检索（ChromaDB 是同步的）
     results = await asyncio.to_thread(
         vector_store.query_memories,
         embedding, user_id, ai_id, top_k, memory_types,
     )
 
+    # 计算每个记忆的年龄
     now = datetime.now(timezone.utc)
     memories = []
     for r in results:
@@ -174,28 +240,42 @@ async def get_contextual_memories(
                 created_dt = datetime.fromisoformat(created_str)
                 age_hours = (now - created_dt).total_seconds() / 3600
             except (ValueError, TypeError):
-                age_hours = 999.0  # parse error → treat as distant
+                age_hours = 999.0  # 解析错误 → 视为远期记忆
         else:
-            age_hours = 999.0  # no timestamp (legacy) → treat as distant
+            age_hours = 999.0  # 无时间戳（遗留数据）→ 视为远期记忆
 
         memories.append({
             "type": r["metadata"].get("memory_type", "fact"),
             "content": r["content"],
-            "relevance": 1.0 - r["distance"],
+            "relevance": 1.0 - r["distance"],  # 将距离转换为相关性
             "age_hours": age_hours,
         })
 
     return memories
 
 
-# ── Fidelity helpers ───────────────────────────────────────────
+# ── 保真度辅助函数 ───────────────────────────────────────────
 
-_FIDELITY_FRESH_HOURS = 24       # < 24h → precise recall
-_FIDELITY_FADING_HOURS = 168     # 24h–7d → fuzzy recall
+# 保真度阈值常量
+_FIDELITY_FRESH_HOURS = 24       # < 24小时 → 精确回忆
+_FIDELITY_FADING_HOURS = 168     # 24小时-7天 → 模糊回忆
 
 
 def _age_tier(age_hours: float) -> str:
-    """Classify memory age into a recall-fidelity tier."""
+    """
+    将记忆年龄分类为回忆保真度层级。
+
+    保真度层级决定了 AI 回忆记忆时的方式：
+    - "fresh"：精确回忆，可以引用细节
+    - "fading"：模糊回忆，可能有些细节不准确
+    - "distant"：只记得核心感受，细节已模糊
+
+    Args:
+        age_hours: 记忆年龄（小时）
+
+    Returns:
+        str: 保真度层级 ("fresh", "fading", 或 "distant")
+    """
     if age_hours < _FIDELITY_FRESH_HOURS:
         return "fresh"
     if age_hours < _FIDELITY_FADING_HOURS:
@@ -203,8 +283,9 @@ def _age_tier(age_hours: float) -> str:
     return "distant"
 
 
-# ── Formatting ─────────────────────────────────────────────────
+# ── 格式化 ─────────────────────────────────────────────────
 
+# 回忆指南：指导 AI 如何根据保真度层级回忆记忆
 _RECALL_GUIDE = (
     "\nMemory Recall Rules:\n"
     "- [fresh]: You recall these clearly. Reference them precisely.\n"
@@ -219,14 +300,21 @@ _RECALL_GUIDE = (
 
 
 def format_memories_for_prompt(memories: list[dict]) -> str:
-    """Format retrieved memories as a block for system prompt injection.
+    """
+    将检索到的记忆格式化为系统提示词注入块。
 
-    Each memory is tagged with a recall-fidelity tier based on its age:
-      - [fresh]   (< 24 h) — precise recall
-      - [fading]  (1-7 days) — fuzzy recall
-      - [distant] (> 7 days or unknown age) — only core feeling
+    每个记忆都标记有回忆保真度层级（基于其年龄）：
+      - [fresh]   (< 24小时) — 精确回忆
+      - [fading]  (1-7天) — 模糊回忆
+      - [distant] (> 7天或未知年龄) — 只记得核心感受
 
-    Returns empty string if no memories (keeps prompt clean for new users).
+    如果没有记忆则返回空字符串（保持新用户提示词简洁）。
+
+    Args:
+        memories: 记忆字典列表（来自 get_contextual_memories）
+
+    Returns:
+        str: 格式化的记忆块，用于注入系统提示词
     """
     if not memories:
         return ""

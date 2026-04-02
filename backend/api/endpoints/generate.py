@@ -9,8 +9,8 @@ from models.user import User
 from models.post import Post
 from models.ai_persona import AIPersona
 from services.aliyun_ai_service import generate_post_caption, generate_image_prompt
-from services.image_gen_service import generate_image
-from services.video_gen_service import generate_video
+from services.image_gen_service import generate_image, generate_image_with_face_ref
+from services.video_gen_service import generate_video, generate_video_with_image_ref
 
 router = APIRouter(prefix="/api/generate", tags=["generate"])
 
@@ -45,18 +45,26 @@ async def generate_post(
         style_tags=persona.ins_style_tags,
     )
 
-    # Step 2: Generate image prompt from caption
+    # Step 2: Generate image prompt from caption (with visual tags for consistency)
     img_prompt = await generate_image_prompt(
         persona_prompt=persona.personality_prompt,
         style_tags=persona.ins_style_tags,
         caption=caption,
+        visual_description=persona.visual_prompt_tags,
     )
+
+    base_face_url = getattr(persona, 'base_face_url', None)
 
     # Step 3: Generate media
     media_url = ""
     if body.media_type == "video":
         try:
-            media_url = await generate_video(prompt=img_prompt, duration=5.0)
+            if base_face_url:
+                media_url = await generate_video_with_image_ref(
+                    prompt=img_prompt, image_ref_url=base_face_url, duration=5.0,
+                )
+            else:
+                media_url = await generate_video(prompt=img_prompt, duration=5.0)
         except Exception as e:
             # Fallback to image if video fails
             print(f"[generate] Video gen failed, falling back to image: {e}")
@@ -64,7 +72,13 @@ async def generate_post(
 
     if body.media_type == "image" or not media_url:
         try:
-            urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
+            if base_face_url:
+                urls = await generate_image_with_face_ref(
+                    prompt=img_prompt, face_ref_url=base_face_url,
+                    size="720*1280", n=1, persona_id=persona.id,
+                )
+            else:
+                urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
             media_url = urls[0] if urls else ""
         except Exception as e:
             print(f"[generate] Image gen failed: {e}")

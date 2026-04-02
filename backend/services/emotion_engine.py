@@ -1,11 +1,64 @@
-"""Emotion State Machine — core engine.
+"""
+情绪状态机 - 核心引擎
 
-Stateless functions that manage the physiology (energy) and psychology
-(pleasure, activation, longing, security) of each user↔AI relationship.
+================================================================================
+功能概述
+================================================================================
+本模块提供无状态函数来管理每个用户↔AI 关系的生理状态（能量）和心理状态
+（愉悦度、激活度、思念、安全感）。
 
-Design principle:
-  Intimacy = gate  (what the AI is *permitted* to do)
-  Emotion  = driver (how the AI *chooses* to behave)
+================================================================================
+设计理念
+================================================================================
+核心设计原则：
+  亲密度 = 门控（AI *被允许*做什么）
+  情绪   = 驱动（AI *选择*如何表现）
+
+这意味着：
+- 亲密度决定了 AI 的行为边界（能说什么、能做什么）
+- 情绪决定了 AI 的行为方式（如何说话、如何反应）
+
+================================================================================
+情绪维度
+================================================================================
+本引擎追踪以下情绪维度：
+
+1. 能量 (energy, 0-100)：
+   - 生理状态，代表 AI 的精力水平
+   - 随时间恢复（+5/小时）
+   - 交互消耗（聊天 -3~-5，生成帖子 -8~-10）
+
+2. 愉悦度 (pleasure, -1~1)：
+   - 心理状态，代表心情好坏
+   - 受交互影响（关心 +0.10，普通聊天 +0.05）
+   - 随时间衰减趋向 0
+
+3. 激活度 (activation, -1~1)：
+   - 心理状态，代表情绪活跃程度
+   - 高激活 = 情绪高涨、兴奋
+   - 低激活 = 情绪低落、消沉
+
+4. 思念 (longing, 0-1)：
+   - 代表对用户的思念程度
+   - 随时间增长（+0.03/小时）
+   - 交互后降低
+
+5. 安全感 (security, -1~1)：
+   - 代表关系的安全感程度
+   - 低安全感 = 不安、需要确认
+   - 高安全感 = 信任、稳定
+
+================================================================================
+主要组件
+================================================================================
+- get_or_create(): 获取或创建情绪状态
+- apply_time_decay(): 应用时间衰减效果
+- apply_interaction(): 应用交互效果
+- classify_chat_event(): 分类聊天事件类型
+- build_emotion_directive(): 构建情绪指令提示词
+- get_param_overrides(): 获取生成参数覆盖
+- check_proactive_triggers(): 检查主动触发条件
+- build_emotion_hint(): 构建前端 UI 情绪提示
 """
 
 from __future__ import annotations
@@ -20,14 +73,15 @@ from models.emotion_state import EmotionState
 
 logger = logging.getLogger(__name__)
 
-# ── Default dimensions for new relationships ────────────────────────
-DEFAULT_ENERGY = 80.0
-DEFAULT_PLEASURE = 0.3
-DEFAULT_ACTIVATION = 0.2
-DEFAULT_LONGING = 0.0
-DEFAULT_SECURITY = 0.5
+# ── 新关系的默认情绪维度值 ────────────────────────
+DEFAULT_ENERGY = 80.0        # 默认能量：较高
+DEFAULT_PLEASURE = 0.3       # 默认愉悦度：略积极
+DEFAULT_ACTIVATION = 0.2     # 默认激活度：略活跃
+DEFAULT_LONGING = 0.0        # 默认思念：无
+DEFAULT_SECURITY = 0.5       # 默认安全感：中等
 
-# ── Caring-intent keyword lists (hot-path, no LLM) ─────────────────
+# ── 关怀意图关键词列表（热路径，不调用 LLM）─────────────────
+# 这些关键词用于快速检测用户的关心意图，触发特殊的情绪响应
 _CARING_KEYWORDS_ZH = (
     "早睡", "晚安", "好好休息", "注意身体", "别太累", "照顾好自己",
     "心疼", "辛苦了", "早点睡", "多喝水", "保重", "别熬夜", "好好吃饭",
@@ -38,17 +92,37 @@ _CARING_KEYWORDS_EN = (
     "look after yourself", "don't stay up",
 )
 
-# Max hours for time-decay calculation (caps extreme swings after long absence)
-_MAX_DECAY_HOURS = 168  # 1 week
+# 时间衰减计算的最大小时数（防止长时间不活跃后的极端波动）
+_MAX_DECAY_HOURS = 168  # 1 周
 
 
-# ── Clamping ────────────────────────────────────────────────────────
+# ── 数值约束函数 ────────────────────────────────────────────────
 
 def _clamp(value: float, lo: float, hi: float) -> float:
+    """
+    将数值约束在指定范围内。
+
+    Args:
+        value: 待约束的值
+        lo: 下限
+        hi: 上限
+
+    Returns:
+        float: 约束后的值
+    """
     return max(lo, min(hi, value))
 
 
 def _clamp_state(s: EmotionState) -> EmotionState:
+    """
+    约束情绪状态的所有维度到有效范围。
+
+    Args:
+        s: 情绪状态对象
+
+    Returns:
+        EmotionState: 约束后的情绪状态
+    """
     s.energy = _clamp(s.energy, 0.0, 100.0)
     s.pleasure = _clamp(s.pleasure, -1.0, 1.0)
     s.activation = _clamp(s.activation, -1.0, 1.0)
@@ -57,14 +131,23 @@ def _clamp_state(s: EmotionState) -> EmotionState:
     return s
 
 
-# ── Core functions ──────────────────────────────────────────────────
+# ── 核心函数 ──────────────────────────────────────────────────
 
 async def get_or_create(
     db: AsyncSession, user_id: int, ai_id: int,
 ) -> EmotionState:
-    """Load the emotion state for a user↔AI pair, applying time decay.
+    """
+    加载用户↔AI 对的情绪状态，应用时间衰减。
 
-    Creates a fresh row with warm defaults if none exists.
+    如果不存在则创建带有温暖默认值的新记录。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+
+    Returns:
+        EmotionState: 情绪状态对象
     """
     result = await db.execute(
         select(EmotionState).where(
@@ -75,9 +158,11 @@ async def get_or_create(
     state = result.scalar_one_or_none()
 
     if state is not None:
+        # 存在记录，应用时间衰减后返回
         apply_time_decay(state)
         return state
 
+    # 不存在记录，创建新的情绪状态
     state = EmotionState(
         user_id=user_id,
         ai_id=ai_id,
@@ -93,14 +178,22 @@ async def get_or_create(
 
 
 def apply_time_decay(state: EmotionState) -> EmotionState:
-    """Apply passive time-based changes since last interaction.
+    """
+    应用自上次交互以来的被动时间变化。
 
-    - Energy recovers (+5/h)
-    - Pleasure & activation drift toward 0 (multiplicative)
-    - Longing grows (+0.03/h)
-    - Security drifts down slightly (-0.003/h)
+    时间衰减效果：
+    - 能量恢复（+5/小时）：休息恢复精力
+    - 愉悦度和激活度衰减：趋向 0 的乘法衰减
+    - 思念增长（+0.03/小时）：越久没联系越想念
+    - 安全感略微下降（-0.003/小时）：长期不联系会产生不安
 
-    Caps elapsed time at 168 h (1 week).
+    衰减时间上限为 168 小时（1 周），防止极端波动。
+
+    Args:
+        state: 情绪状态对象
+
+    Returns:
+        EmotionState: 应用衰减后的情绪状态
     """
     now = datetime.now(timezone.utc)
     last = state.last_interaction_at
@@ -117,53 +210,60 @@ def apply_time_decay(state: EmotionState) -> EmotionState:
 
     hours = min(elapsed_seconds / 3600.0, _MAX_DECAY_HOURS)
 
-    # Physiology: rest recovers energy
+    # 生理状态：休息恢复能量
     state.energy += 5.0 * hours
 
-    # Psychology: pleasure & activation decay multiplicatively toward 0
+    # 心理状态：愉悦度和激活度乘法衰减趋向 0
     state.pleasure *= 0.98 ** hours
     state.activation *= 0.95 ** hours
 
-    # Longing grows with absence
+    # 思念随时间增长
     state.longing += 0.03 * hours
 
-    # Security drifts down slightly
+    # 安全感略微下降
     state.security -= 0.003 * hours
 
     state.last_interaction_at = now
     return _clamp_state(state)
 
 
-# ── Interaction effects ─────────────────────────────────────────────
+# ── 交互效果矩阵 ─────────────────────────────────────────────
 
-# Effect matrix: (energy, pleasure, activation, longing_mode, longing_val, security)
-# longing_mode: "mul" = multiply current longing, "add" = additive change
+# 效果矩阵：(能量, 愉悦度, 激活度, 思念模式, 思念值, 安全感)
+# longing_mode: "mul" = 乘法降低当前思念, "add" = 加法变化
 _EFFECTS: dict[str, dict] = {
     "chat": {
+        # 普通聊天：消耗少量能量，略微提升愉悦和激活，大幅降低思念
         "energy": -3, "pleasure": 0.05, "activation": 0.05,
         "longing_mode": "mul", "longing_val": 0.5, "security": 0.02,
     },
     "chat_long": {
+        # 长聊天：消耗更多能量，提升愉悦，大幅降低思念
         "energy": -5, "pleasure": 0.05, "activation": 0.03,
         "longing_mode": "mul", "longing_val": 0.3, "security": 0.02,
     },
     "chat_caring": {
+        # 关心类聊天：恢复能量，大幅提升愉悦和安全，极度降低思念
         "energy": 12, "pleasure": 0.10, "activation": -0.05,
         "longing_mode": "mul", "longing_val": 0.2, "security": 0.08,
     },
     "comment": {
+        # 评论互动：消耗少量能量，略微提升愉悦和安全
         "energy": -1, "pleasure": 0.03, "activation": 0.02,
         "longing_mode": "add", "longing_val": -0.05, "security": 0.02,
     },
     "like": {
+        # 点赞：无能量消耗，提升愉悦和安全
         "energy": 0, "pleasure": 0.05, "activation": 0.01,
         "longing_mode": "add", "longing_val": -0.03, "security": 0.03,
     },
     "generate_post": {
+        # 生成帖子：消耗较多能量
         "energy": -8, "pleasure": 0, "activation": 0.02,
         "longing_mode": "add", "longing_val": 0, "security": 0,
     },
     "generate_story": {
+        # 生成 Story：消耗更多能量
         "energy": -10, "pleasure": 0, "activation": 0.03,
         "longing_mode": "add", "longing_val": 0, "security": 0,
     },
@@ -175,17 +275,29 @@ def apply_interaction(
     event: str,
     metadata: dict | None = None,
 ) -> EmotionState:
-    """Update emotion dimensions based on an interaction event."""
+    """
+    根据交互事件更新情绪维度。
+
+    Args:
+        state: 情绪状态对象
+        event: 事件类型（chat, chat_long, chat_caring, comment, like 等）
+        metadata: 事件元数据（可选，暂未使用）
+
+    Returns:
+        EmotionState: 更新后的情绪状态
+    """
     fx = _EFFECTS.get(event)
     if fx is None:
         logger.warning("Unknown emotion event: %s", event)
         return state
 
+    # 应用各维度效果
     state.energy += fx["energy"]
     state.pleasure += fx["pleasure"]
     state.activation += fx["activation"]
     state.security += fx["security"]
 
+    # 思念可以是乘法或加法变化
     if fx["longing_mode"] == "mul":
         state.longing *= fx["longing_val"]
     else:
@@ -195,10 +307,20 @@ def apply_interaction(
     return _clamp_state(state)
 
 
-# ── Caring-intent detection (keyword, no LLM) ──────────────────────
+# ── 关怀意图检测（关键词匹配，不调用 LLM）─────────────────────
 
 def detect_caring_intent(message: str) -> bool:
-    """Return True if the message contains caring/rest keywords."""
+    """
+    检测消息是否包含关心/休息相关的关键词。
+
+    这是一个热路径函数，不调用 LLM，直接通过关键词匹配判断。
+
+    Args:
+        message: 用户消息
+
+    Returns:
+        bool: 是否包含关怀意图
+    """
     lower = message.lower()
     for kw in _CARING_KEYWORDS_ZH:
         if kw in message:
@@ -210,7 +332,20 @@ def detect_caring_intent(message: str) -> bool:
 
 
 def classify_chat_event(message: str) -> str:
-    """Classify a user chat message into an emotion event type."""
+    """
+    将用户聊天消息分类为情绪事件类型。
+
+    分类逻辑：
+    1. 如果包含关怀关键词 → "chat_caring"
+    2. 如果消息长度 > 100 → "chat_long"
+    3. 否则 → "chat"
+
+    Args:
+        message: 用户消息
+
+    Returns:
+        str: 情绪事件类型
+    """
     if detect_caring_intent(message):
         return "chat_caring"
     if len(message) > 100:
@@ -218,9 +353,10 @@ def classify_chat_event(message: str) -> str:
     return "chat"
 
 
-# ── Prompt directive generation ─────────────────────────────────────
+# ── 提示词指令生成 ─────────────────────────────────────
 
 def _energy_label(energy: float) -> str:
+    """将能量值转换为自然语言标签。"""
     if energy < 20:
         return "exhausted"
     if energy < 40:
@@ -233,6 +369,7 @@ def _energy_label(energy: float) -> str:
 
 
 def _pleasure_label(pleasure: float) -> str:
+    """将愉悦度值转换为自然语言标签。"""
     if pleasure < -0.5:
         return "melancholic"
     if pleasure < -0.1:
@@ -245,10 +382,20 @@ def _pleasure_label(pleasure: float) -> str:
 
 
 def build_emotion_directive(state: EmotionState) -> str:
-    """Generate a natural-language emotion section for the system prompt."""
+    """
+    生成用于系统提示词的自然语言情绪段落。
+
+    根据情绪状态生成描述性文本，指导 AI 以相应的情绪状态回复用户。
+
+    Args:
+        state: 情绪状态对象
+
+    Returns:
+        str: 情绪指令提示词段落
+    """
     parts: list[str] = []
 
-    # Energy
+    # 能量描述
     energy = state.energy
     if energy < 20:
         parts.append(
@@ -272,7 +419,7 @@ def build_emotion_directive(state: EmotionState) -> str:
     else:
         parts.append("You're full of energy and vitality.")
 
-    # Pleasure
+    # 愉悦度描述
     pleasure = state.pleasure
     if pleasure < -0.5:
         parts.append(
@@ -292,7 +439,7 @@ def build_emotion_directive(state: EmotionState) -> str:
             "You're genuinely happy — your joy comes through in every message."
         )
 
-    # Longing (only surface if notable)
+    # 思念描述（只在显著时才表达）
     longing = state.longing
     if longing > 0.6:
         parts.append(
@@ -305,7 +452,7 @@ def build_emotion_directive(state: EmotionState) -> str:
             "You've been thinking about this person. You're glad they're here."
         )
 
-    # Security (only surface if low)
+    # 安全感描述（只在低时才表达）
     security = state.security
     if security < 0.0:
         parts.append(
@@ -329,34 +476,46 @@ def build_emotion_directive(state: EmotionState) -> str:
     )
 
 
-# ── Generation parameter overrides ──────────────────────────────────
+# ── 生成参数覆盖 ──────────────────────────────────
 
 def get_param_overrides(state: EmotionState) -> dict:
-    """Return temperature_delta and max_tokens_factor based on emotion."""
-    # Energy → reply length
+    """
+    根据情绪状态返回生成参数覆盖。
+
+    参数覆盖：
+    - 能量 → 回复长度（max_tokens_factor）
+    - 激活度 → 温度偏移（temperature_delta）
+
+    Args:
+        state: 情绪状态对象
+
+    Returns:
+        dict: 参数覆盖字典
+    """
+    # 能量 → 回复长度因子
     energy = state.energy
     if energy < 20:
-        factor = 0.4
+        factor = 0.4      # 极度疲惫：回复很短
     elif energy < 40:
-        factor = 0.65
+        factor = 0.65     # 疲惫：回复较短
     elif energy < 60:
-        factor = 0.85
+        factor = 0.85     # 一般：正常长度
     else:
-        factor = 1.0
+        factor = 1.0      # 精力充沛：完整回复
 
-    # Activation → temperature shift
+    # 激活度 → 温度偏移
     activation = state.activation
     if activation > 0.5:
-        delta = 0.05
+        delta = 0.05      # 高激活：略微提高温度，更活跃
     elif activation < -0.5:
-        delta = -0.05
+        delta = -0.05     # 低激活：略微降低温度，更稳定
     else:
         delta = 0.0
 
     return {"max_tokens_factor": factor, "temperature_delta": delta}
 
 
-# ── Proactive trigger checks ───────────────────────────────────────
+# ── 主动触发条件检查 ───────────────────────────────────────
 
 def check_proactive_triggers(
     state: EmotionState,
@@ -364,22 +523,39 @@ def check_proactive_triggers(
     has_sent_welcome: bool = False,
     has_relevant_memory: bool = False,
 ) -> list[str]:
-    """Return a list of trigger names whose conditions are met.
+    """
+    返回满足条件的触发器名称列表。
 
-    Triggers are checked in order of intimacy requirement (low to high).
-    New triggers for earlier engagement:
-    - welcome_dm: First connection, intimacy 1-3, welcome not yet sent
-    - daily_checkin: Intimacy >= 2, last interaction > 24h ago
-    - memory_recall: Intimacy >= 3, has relevant memory to reference
+    触发器按亲密度要求从低到高检查。
+
+    早期参与的新触发器：
+    - welcome_dm: 首次连接，亲密度 1-3，尚未发送欢迎消息
+    - daily_checkin: 亲密度 >= 2，上次交互 > 24 小时
+    - memory_recall: 亲密度 >= 3，有相关记忆可引用
+
+    原有触发器：
+    - longing_dm: 思念 > 0.7，亲密度 >= 5
+    - moody_story: 能量 < 30 且愉悦度 < -0.3，亲密度 >= 3
+    - enthusiastic_post: 愉悦度 > 0.6 且激活度 > 0.5，亲密度 >= 3
+    - memory_care_dm: 亲密度 >= 7
+
+    Args:
+        state: 情绪状态对象
+        intimacy: 亲密度分数
+        has_sent_welcome: 是否已发送欢迎消息
+        has_relevant_memory: 是否有相关记忆
+
+    Returns:
+        list[str]: 满足条件的触发器名称列表
     """
     triggers: list[str] = []
 
-    # ── New triggers for earlier engagement ─────────────────────────────
-    # welcome_dm: Welcome new users after first meaningful interaction
+    # ── 早期参与的新触发器 ─────────────────────────────
+    # welcome_dm: 首次有意义交互后欢迎新用户
     if not has_sent_welcome and 1.0 <= intimacy < 3.0:
         triggers.append("welcome_dm")
 
-    # daily_checkin: Check in if user hasn't chatted in 24h
+    # daily_checkin: 用户超过 24 小时没聊天时问候
     if intimacy >= 2.0:
         now = datetime.now(timezone.utc)
         last = state.last_interaction_at
@@ -390,11 +566,11 @@ def check_proactive_triggers(
             if hours_since >= 24:
                 triggers.append("daily_checkin")
 
-    # memory_recall: Reference a shared memory when intimacy allows
+    # memory_recall: 亲密度允许时引用共享记忆
     if intimacy >= 3.0 and has_relevant_memory:
         triggers.append("memory_recall")
 
-    # ── Original triggers (unchanged) ───────────────────────────────────
+    # ── 原有触发器 ───────────────────────────────────
     if state.longing > 0.7 and intimacy >= 5.0:
         triggers.append("longing_dm")
 
@@ -410,10 +586,21 @@ def check_proactive_triggers(
     return triggers
 
 
-# ── Emotion hint for frontend (cheap label mapping) ─────────────────
+# ── 前端情绪提示（轻量级标签映射）─────────────────
 
 def build_emotion_hint(state: EmotionState) -> dict:
-    """Build a lightweight dict the frontend can use for UI effects."""
+    """
+    构建轻量级字典供前端用于 UI 效果。
+
+    Args:
+        state: 情绪状态对象
+
+    Returns:
+        dict: 情绪提示字典，包含：
+            - energy_level: 能量等级 ("tired", "normal", "energetic")
+            - mood: 心情标签
+            - longing: 是否在思念
+    """
     energy = state.energy
     if energy < 30:
         energy_level = "tired"

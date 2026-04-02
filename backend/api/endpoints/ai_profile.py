@@ -88,6 +88,8 @@ class EmotionOut(BaseModel):
     longing: bool
     energy: float
     pleasure: float
+    persona_local_time: str = ""
+    persona_timezone: str = ""
 
 
 # ── Helpers ─────────────────────────────────────────────────────
@@ -333,12 +335,30 @@ async def get_emotion_status(
     """Get AI emotion status for the user-AI relationship."""
     emo = await emotion_engine.get_or_create(db, current_user.id, ai_id)
     hint = emotion_engine.build_emotion_hint(emo)
+
+    # Compute persona local time for timezone indicator
+    persona_local_time = ""
+    persona_timezone = ""
+    persona_result = await db.execute(
+        select(AIPersona).where(AIPersona.id == ai_id)
+    )
+    persona = persona_result.scalar_one_or_none()
+    if persona:
+        persona_timezone = persona.timezone or "Asia/Shanghai"
+        try:
+            tz = pytz.timezone(persona_timezone)
+            persona_local_time = datetime.now(tz).strftime("%H:%M")
+        except Exception:
+            persona_local_time = datetime.utcnow().strftime("%H:%M")
+
     return EmotionOut(
         energy_level=hint["energy_level"],
         mood=hint["mood"],
         longing=hint["longing"],
         energy=emo.energy,
         pleasure=emo.pleasure,
+        persona_local_time=persona_local_time,
+        persona_timezone=persona_timezone,
     )
 
 

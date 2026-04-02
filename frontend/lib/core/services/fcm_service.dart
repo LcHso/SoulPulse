@@ -24,7 +24,8 @@ class FcmService {
   /// Initialize FCM. Returns immediately if Firebase not configured.
   Future<void> initialize() async {
     print('[FCM] Firebase not configured - using local notifications only');
-    print('[FCM] To enable push notifications, follow setup instructions in fcm_service.dart');
+    print(
+        '[FCM] To enable push notifications, follow setup instructions in fcm_service.dart');
     return;
   }
 

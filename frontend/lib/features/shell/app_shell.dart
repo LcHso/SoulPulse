@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/providers/chat_provider.dart';
 import '../../core/providers/notification_provider.dart';
+import '../discover/discover_page.dart' show personasRefreshProvider;
 
 class AppShell extends ConsumerStatefulWidget {
   final StatefulNavigationShell navigationShell;
@@ -37,7 +38,10 @@ class _AppShellState extends ConsumerState<AppShell> {
             index,
             initialLocation: index == widget.navigationShell.currentIndex,
           );
-          // Refresh unread on tab switch
+          // Refresh data on tab switch
+          if (index == 1) {
+            ref.read(personasRefreshProvider.notifier).state++;
+          }
           if (index == 2) {
             ref.invalidate(unreadCountProvider);
             ref.invalidate(conversationsProvider);

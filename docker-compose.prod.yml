@@ -18,6 +18,27 @@ services:
       timeout: 10s
       retries: 3
 
+  # Admin backend on port 8002
+  admin-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soulpulse-admin
+    restart: unless-stopped
+    command: ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+    volumes:
+      - ./data/soulpulse.db:/app/soulpulse.db
+      - ./data/chroma_data:/app/chroma_data
+      - ./backend/static:/app/static
+      - ./backend/.env.production:/app/.env:ro
+    networks:
+      - soulpulse-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   scheduler:
     build:
       context: ./backend
@@ -47,6 +68,7 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
       - ./frontend/build/web:/usr/share/nginx/html:ro
+      - ./admin-frontend/dist:/usr/share/nginx/admin-html:ro
       - ./backend/static:/usr/share/nginx/static:ro
       - ./certbot/www:/var/www/certbot:ro
       - ./certbot/conf:/etc/letsencrypt:ro
