@@ -161,7 +161,96 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
+
+    # Check for active ban
+    await _check_user_ban(db, user_id)
+
     return user
+
+
+async def get_current_user_optional(
+    db: AsyncSession = Depends(get_db),
+    token: Optional[str] = Depends(OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)),
+) -> Optional["User"]:
+    """
+    获取当前登录用户的可选依赖注入函数
+
+    与 get_current_user() 不同，此函数：
+    1. 不要求必须认证，未认证时返回 None
+    2. 适用于公开接口但需要根据登录状态返回不同数据的场景
+
+    使用场景：
+        公开接口如 AI 人格列表，未登录用户可查看基础信息
+
+    Args:
+        db: 数据库会话
+        token: OAuth2 方案自动提取的 JWT 令牌（可选）
+
+    Returns:
+        User | None: 已认证返回用户对象，未认证返回 None
+    """
+    from models.user import User
+
+    if token is None:
+        return None
+
+    try:
+        # 解码 JWT 令牌
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        user_id = int(user_id)
+    except (JWTError, ValueError):
+        return None
+
+    # 从数据库查询用户
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+
+    # Check for active ban (return None if banned)
+    if user:
+        try:
+            await _check_user_ban(db, user_id)
+        except HTTPException:
+            return None
+
+    return user
+
+
+async def _check_user_ban(db: AsyncSession, user_id: int) -> None:
+    """
+    Check if user has an active ban.
+
+    Queries content_moderation_logs for the most recent ban/unban action.
+    If the most recent action is a ban, raises HTTPException(403).
+
+    Args:
+        db: Database session
+        user_id: User ID to check
+
+    Raises:
+        HTTPException: 403 if user is banned
+    """
+    from models.content_moderation_log import ContentModerationLog
+    from sqlalchemy import desc
+
+    # Get the most recent ban/unban action for this user
+    result = await db.execute(
+        select(ContentModerationLog)
+        .where(ContentModerationLog.content_type == "user_ban")
+        .where(ContentModerationLog.user_id == user_id)
+        .where(ContentModerationLog.action_taken.in_(["ban", "unban"]))
+        .order_by(desc(ContentModerationLog.created_at))
+        .limit(1)
+    )
+    latest_action = result.scalar_one_or_none()
+
+    if latest_action and latest_action.action_taken == "ban":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account suspended",
+        )
 
 
 async def authenticate_ws_token(token: str, db: AsyncSession) -> Optional["User"]:
@@ -206,7 +295,16 @@ async def authenticate_ws_token(token: str, db: AsyncSession) -> Optional["User"
 
     # 从数据库查询用户
     result = await db.execute(select(User).where(User.id == user_id))
-    return result.scalar_one_or_none()
+    user = result.scalar_one_or_none()
+
+    # Check for active ban (return None if banned, WebSocket will close with 4001)
+    if user:
+        try:
+            await _check_user_ban(db, user_id)
+        except HTTPException:
+            return None
+
+    return user
 
 
 async def get_current_admin_user(

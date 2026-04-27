@@ -22,6 +22,16 @@ class AnalyticsOverview(BaseModel):
     total_stories: int
     active_users_24h: int
     online_now: int
+    active_users_30d: int = 0
+    dau_mau_ratio: float = 0.0
+    avg_session_length_min: float = 0.0
+
+
+class CharacterDistribution(BaseModel):
+    ai_id: int
+    ai_name: str
+    message_count: int
+    percentage: float
 
 
 class DailyStats(BaseModel):
@@ -87,6 +97,21 @@ async def get_analytics_overview(
     )
     active_users_24h = active_r.scalar() or 0
 
+    # Active users in last 30 days (MAU)
+    cutoff_30d = datetime.now(timezone.utc) - timedelta(days=30)
+    active_30d_r = await db.execute(
+        select(func.count(func.distinct(ChatMessage.user_id)))
+        .where(ChatMessage.created_at >= cutoff_30d)
+    )
+    active_users_30d = active_30d_r.scalar() or 0
+
+    # DAU/MAU ratio (stickiness indicator)
+    dau_mau_ratio = round(active_users_24h / active_users_30d * 100, 1) if active_users_30d > 0 else 0.0
+
+    # Average session length estimate (based on message timestamps)
+    # For each user-day: time between first and last message, averaged
+    avg_session_length_min = await _calculate_avg_session_length(db)
+
     # Online now (from ws_manager)
     online_now = 0
     try:
@@ -105,6 +130,9 @@ async def get_analytics_overview(
         total_stories=total_stories,
         active_users_24h=active_users_24h,
         online_now=online_now,
+        active_users_30d=active_users_30d,
+        dau_mau_ratio=dau_mau_ratio,
+        avg_session_length_min=avg_session_length_min,
     )
 
 
@@ -180,7 +208,8 @@ async def get_retention(
             results.append(RetentionData(period=label, registered=0, returned=0, rate=0.0))
             continue
 
-        # Of those, how many sent a message in the last `days` days
+        # Among those users, count how many were active in the past `days` days
+        # Active = sent at least one message in the period
         activity_cutoff = now - timedelta(days=days)
         ret_r = await db.execute(
             select(func.count(func.distinct(ChatMessage.user_id)))
@@ -280,3 +309,100 @@ async def get_recent_errors(
         ]
     except Exception:
         return []
+
+
+@router.get("/analytics/character-distribution")
+async def get_character_distribution(
+    days: int = 30,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin_user),
+):
+    """Get message distribution per AI character."""
+    from models.ai_persona import AIPersona
+    from models.chat_message import ChatMessage
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # Get message counts per AI
+    stmt = (
+        select(
+            ChatMessage.ai_id,
+            func.count(ChatMessage.id).label("message_count"),
+        )
+        .where(ChatMessage.created_at >= cutoff)
+        .group_by(ChatMessage.ai_id)
+        .order_by(func.count(ChatMessage.id).desc())
+    )
+    result = await db.execute(stmt)
+    rows = result.all()
+
+    # Calculate total
+    total_messages = sum(row.message_count for row in rows)
+
+    # Get persona names
+    entries = []
+    for row in rows:
+        ai_id = row.ai_id
+        message_count = row.message_count
+        percentage = round(message_count / total_messages * 100, 1) if total_messages > 0 else 0.0
+
+        # Get persona name
+        p_r = await db.execute(select(AIPersona.name).where(AIPersona.id == ai_id))
+        name = p_r.scalar_one_or_none() or f"AI #{ai_id}"
+
+        entries.append(CharacterDistribution(
+            ai_id=ai_id,
+            ai_name=name,
+            message_count=message_count,
+            percentage=percentage,
+        ))
+
+    return entries
+
+
+async def _calculate_avg_session_length(db: AsyncSession) -> float:
+    """
+    Calculate average session length in minutes.
+
+    Estimates from message timestamps:
+    - For each user-day: time between first and last message
+    - Average across all user-days in the past 30 days
+    """
+    from models.chat_message import ChatMessage
+
+    # Get all messages from past 30 days, grouped by user and date
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+
+    # Query to get first and last message time per user per day
+    # Using raw SQL for efficiency
+    query = text("""
+        SELECT
+            user_id,
+            DATE(created_at) as msg_date,
+            MIN(created_at) as first_msg,
+            MAX(created_at) as last_msg
+        FROM chat_messages
+        WHERE created_at >= :cutoff
+        GROUP BY user_id, DATE(created_at)
+        HAVING COUNT(*) > 1
+    """)
+
+    try:
+        result = await db.execute(query, {"cutoff": cutoff})
+        rows = result.fetchall()
+
+        if not rows:
+            return 0.0
+
+        total_minutes = 0.0
+        for row in rows:
+            first_msg = row.first_msg
+            last_msg = row.last_msg
+            if first_msg and last_msg:
+                diff = (last_msg - first_msg).total_seconds() / 60.0
+                total_minutes += diff
+
+        return round(total_minutes / len(rows), 1) if rows else 0.0
+    except Exception:
+        return 0.0
+

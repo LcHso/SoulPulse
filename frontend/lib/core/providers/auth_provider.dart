@@ -19,8 +19,8 @@
 //
 // ============================================================================
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../api/api_client.dart';
 import '../services/local_notification_service.dart';
 
@@ -119,13 +119,27 @@ class AuthNotifier extends Notifier<AuthState> {
       // 更新认证状态为已登录
       state = AuthState(isLoggedIn: true, user: user);
 
-      // 在 Android 平台启动通知轮询服务
-      if (!kIsWeb) LocalNotificationService.startPolling();
+      // 启动通知轮询服务
+      LocalNotificationService.startPolling();
     } catch (e) {
       // 登录失败，更新加载状态并重新抛出异常
       state = state.copyWith(isLoading: false);
       rethrow;
     }
+  }
+
+  /// 检查用户是否需要完成引导流程
+  ///
+  /// 返回 true 表示需要引导，false 表示已完成引导
+  Future<bool> needsOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    return !(prefs.getBool('onboarding_complete') ?? false);
+  }
+
+  /// 标记引导流程已完成
+  Future<void> completeOnboarding() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('onboarding_complete', true);
   }
 
   /// 用户注册
@@ -206,7 +220,7 @@ class AuthNotifier extends Notifier<AuthState> {
   /// 3. 更新状态为未登录
   Future<void> logout() async {
     // 停止通知轮询服务
-    if (!kIsWeb) LocalNotificationService.stopPolling();
+    LocalNotificationService.stopPolling();
 
     // 清除令牌和缓存
     await ApiClient.clearToken();

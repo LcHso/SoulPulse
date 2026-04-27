@@ -290,10 +290,12 @@ class _PostCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final mediaUrl = post['media_url'] ?? '';
+    final mediaUrl =
+        ApiClient.proxyImageUrl(post['media_url'] as String? ?? '');
     final caption = post['caption'] ?? '';
     final aiName = post['ai_name'] ?? 'Unknown';
-    final aiAvatar = post['ai_avatar'] ?? '';
+    final aiAvatar =
+        ApiClient.proxyImageUrl(post['ai_avatar'] as String? ?? '');
     final createdAt = post['created_at'] ?? '';
 
     return Card(

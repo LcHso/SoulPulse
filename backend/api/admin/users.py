@@ -143,6 +143,13 @@ async def set_user_admin(
     admin=Depends(get_current_admin_user),
 ):
     from models.user import User
+    from core.config import settings
+    
+    # Only super admin (id=1 or configured super_admin_id) can modify admin roles
+    super_admin_id = getattr(settings, 'SUPER_ADMIN_ID', 1)
+    if admin.id != 1 and admin.id != super_admin_id:
+        raise HTTPException(status_code=403, detail="Only super admin can modify admin roles")
+    
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalar_one_or_none()
     if not user:

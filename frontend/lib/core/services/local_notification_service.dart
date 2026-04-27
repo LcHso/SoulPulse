@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import '../api/api_client.dart';
+import 'web_notification_service.dart';
 
 /// Callback for handling notification taps (must be top-level or static).
 @pragma('vm:entry-point')
@@ -39,12 +40,28 @@ class LocalNotificationService {
 
   /// Initialize the notification plugin. Call once from main().
   static Future<void> init() async {
-    if (_initialized || kIsWeb) return;
+    if (_initialized) return;
+
+    if (kIsWeb) {
+      // On web, request browser notification permission
+      await WebNotificationService.requestPermission();
+      _initialized = true;
+      return;
+    }
 
     const androidSettings =
         AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    const initSettings = InitializationSettings(android: androidSettings);
+    const iosSettings = DarwinInitializationSettings(
+      requestAlertPermission: true,
+      requestBadgePermission: true,
+      requestSoundPermission: true,
+    );
+
+    const initSettings = InitializationSettings(
+      android: androidSettings,
+      iOS: iosSettings,
+    );
 
     await _plugin.initialize(
       initSettings,
@@ -63,7 +80,6 @@ class LocalNotificationService {
 
   /// Start periodic polling for new notifications.
   static void startPolling({Duration interval = const Duration(seconds: 30)}) {
-    if (kIsWeb) return;
     stopPolling();
     // Initial check after 5 seconds
     Future.delayed(const Duration(seconds: 5), _checkForNew);
@@ -119,6 +135,12 @@ class LocalNotificationService {
       'type': type,
       'data_json': notif['data_json'],
     });
+
+    // On web, use browser Notification API
+    if (kIsWeb) {
+      WebNotificationService.showNotification(title, body);
+      return;
+    }
 
     String channelId = 'soulpulse_default';
     String channelName = 'SoulPulse';

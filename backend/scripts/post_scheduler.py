@@ -49,6 +49,7 @@ from models.emotion_state import EmotionState
 from services import emotion_engine
 from services.aliyun_ai_service import (
     generate_post_caption,
+    generate_text_only_caption,
     generate_image_prompt,
     generate_story_video_prompt,
 )
@@ -122,20 +123,33 @@ async def _apply_energy_cost_to_states(
         emotion_engine.apply_interaction(s, event)
 
 
+# ── 帖子类型权重配置 ──────────────────────────────────────────
+# 80% 图片帖，20% 纯文字帖
+POST_TYPE_WEIGHTS = {
+    "image_only": 0.80,
+    "text_only": 0.20,
+}
+
+
 async def generate_new_post():
     """
     为选定的 AI 角色生成新的 Instagram 风格帖子。
 
     处理流程：
         1. 获取所有 AI 角色，基于当前小时轮询选择一个
-        2. 获取该角色的聚合情绪状态
-        3. 生成情绪感知的帖子文案
-        4. 生成对应的 AI 图片
-        5. 创建帖子记录
-        6. 应用能量消耗
+        2. 随机决定帖子类型（80% 图片帖，20% 纯文字帖）
+        3. 获取该角色的聚合情绪状态
+        4. 生成情绪感知的帖子文案
+        5. 对于图片帖：生成对应的 AI 图片
+        6. 创建帖子记录
+        7. 应用能量消耗
+
+    帖子类型：
+        - image_only: 带图片的帖子（80% 概率）
+        - text_only: 纯文字帖子（20% 概率），文案更长更深刻
 
     图片规格：
-        - 尺寸：720*1280（4:5竖版，类似 Instagram）
+        - 尺寸：根据配置随机选择（9:16 竖版、1:1 方形、16:9 横版）
 
     轮询逻辑：
         使用当前 UTC 时间的小时数对角色数量取模，确保每个角色
@@ -170,6 +184,14 @@ async def generate_new_post():
 
         persona = personas[idx]
 
+        # ── 随机决定帖子类型 ───────────────────
+        post_type = random.choices(
+            list(POST_TYPE_WEIGHTS.keys()),
+            weights=list(POST_TYPE_WEIGHTS.values()),
+            k=1
+        )[0]
+        print(f"[scheduler] Selected post type: {post_type} for {persona.name}")
+
         # ── 获取该角色的聚合情绪 ───────────────────
         emo_result = await db.execute(
             select(EmotionState).where(EmotionState.ai_id == persona.id)
@@ -177,49 +199,63 @@ async def generate_new_post():
         emo_states = emo_result.scalars().all()
         mood_hint = _aggregate_mood_hint(emo_states)
 
-        # 步骤1：生成情绪感知的帖子文案
+        # 步骤1：生成帖子文案
+        caption = ""
         try:
-            caption = await generate_post_caption(
-                persona_prompt=persona.personality_prompt,
-                style_tags=persona.ins_style_tags,
-                mood_hint=mood_hint,
-                timezone_str=persona.timezone,
-            )
+            if post_type == "text_only":
+                # 纯文字帖：生成更长、更深刻的文案
+                caption = await generate_text_only_caption(
+                    persona_prompt=persona.personality_prompt,
+                    style_tags=persona.ins_style_tags,
+                    mood_hint=mood_hint,
+                    timezone_str=persona.timezone,
+                )
+            else:
+                # 图片帖：生成简短文案
+                caption = await generate_post_caption(
+                    persona_prompt=persona.personality_prompt,
+                    style_tags=persona.ins_style_tags,
+                    mood_hint=mood_hint,
+                    timezone_str=persona.timezone,
+                )
         except Exception as e:
             print(f"[scheduler] Caption generation failed: {e}")
             caption = f"Living my best life. #{persona.name.lower()}"
 
-        # 步骤2：生成图片提示词
+        # 步骤2：生成图片（仅图片帖）
         media_url = ""
-        try:
-            img_prompt = await generate_image_prompt(
-                persona_prompt=persona.personality_prompt,
-                style_tags=persona.ins_style_tags,
-                caption=caption,
-                visual_description=persona.visual_prompt_tags,
-            )
-            print(f"[scheduler] Image prompt: {img_prompt[:80]}...")
-
-            # 步骤3：生成图片（4:5竖版，类似 Instagram）
-            base_face_url = getattr(persona, 'base_face_url', None)
-            if base_face_url:
-                print(f"[scheduler] Using face reference for {persona.name}")
-                urls = await generate_image_with_face_ref(
-                    prompt=img_prompt, face_ref_url=base_face_url,
-                    size="720*1280", n=1, persona_id=persona.id,
+        if post_type == "image_only":
+            try:
+                img_prompt = await generate_image_prompt(
+                    persona_prompt=persona.personality_prompt,
+                    style_tags=persona.ins_style_tags,
+                    caption=caption,
+                    visual_description=persona.visual_prompt_tags,
+                    persona_name=persona.name,
                 )
-            else:
-                urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
-            media_url = urls[0] if urls else ""
-            print(f"[scheduler] Image generated: {media_url[:80]}...")
-        except Exception as e:
-            print(f"[scheduler] Image generation failed: {e}")
+                print(f"[scheduler] Image prompt: {img_prompt[:80]}...")
+
+                # 步骤3：生成图片（随机尺寸）
+                base_face_url = getattr(persona, 'base_face_url', None)
+                if base_face_url:
+                    print(f"[scheduler] Using face reference for {persona.name}")
+                    urls = await generate_image_with_face_ref(
+                        prompt=img_prompt, face_ref_url=base_face_url,
+                        n=1, persona_id=persona.id,
+                    )
+                else:
+                    urls = await generate_image(prompt=img_prompt, n=1)
+                media_url = urls[0] if urls else ""
+                print(f"[scheduler] Image generated: {media_url[:80]}...")
+            except Exception as e:
+                print(f"[scheduler] Image generation failed: {e}")
 
         # 步骤4：保存帖子记录
         post = Post(
             ai_id=persona.id,
             media_url=media_url,
             caption=caption,
+            post_type=post_type,
         )
         db.add(post)
 
@@ -227,7 +263,7 @@ async def generate_new_post():
         await _apply_energy_cost_to_states(db, persona.id, "generate_post")
 
         await db.commit()
-        print(f"[scheduler] New post by {persona.name}: {caption[:60]}...")
+        print(f"[scheduler] New {post_type} post by {persona.name}: {caption[:60]}...")
 
 
 async def generate_new_story():

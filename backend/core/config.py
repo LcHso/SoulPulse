@@ -100,6 +100,10 @@ class Settings(BaseModel):
     # 允许的跨域来源，多个用逗号分隔，"*" 表示允许所有（仅开发环境）
     ALLOWED_ORIGINS: str = _env("ALLOWED_ORIGINS", "*")
 
+    # ── 媒体生成开关 ──────────────────────────────────────────
+    # 是否启用图片/视频生成功能（设为 False 可关闭所有生成，节省 API 费用）
+    ENABLE_MEDIA_GENERATION: bool = _env("ENABLE_MEDIA_GENERATION", "true").lower() in ("true", "1", "yes")
+
     # ── 故事/快拍配置 ──────────────────────────────────────────
     # 故事过期时间（小时），过期后自动删除
     STORY_EXPIRATION_HOURS: int = int(_env("STORY_EXPIRATION_HOURS", "24"))

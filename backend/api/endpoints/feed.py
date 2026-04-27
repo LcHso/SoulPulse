@@ -48,7 +48,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, delete as sql_delete
+from sqlalchemy import select, func, delete as sql_delete, update as sql_update
 from datetime import datetime, timezone
 from typing import Optional
 import asyncio
@@ -308,11 +308,18 @@ async def like_post(
         )
     )
     if existing.scalar_one_or_none():
-        return {"liked": True, "like_count": post.like_count}
+        # 已点赞，返回幂等响应
+        return {"status": "already_liked", "like_count": post.like_count}
 
     # 创建点赞记录
     db.add(UserLike(user_id=current_user.id, post_id=post_id))
-    post.like_count += 1
+
+    # 原子性地增加点赞数
+    await db.execute(
+        sql_update(Post)
+        .where(Post.id == post_id)
+        .values(like_count=Post.like_count + 1)
+    )
 
     # 更新亲密度
     interaction_result = await db.execute(
@@ -337,7 +344,10 @@ async def like_post(
     emotion_engine.apply_interaction(emo, "like")
 
     await db.commit()
-    return {"liked": True, "like_count": post.like_count}
+
+    # 重新获取更新后的点赞数
+    await db.refresh(post)
+    return {"status": "liked", "like_count": post.like_count}
 
 
 @router.delete("/posts/{post_id}/like")
@@ -373,12 +383,24 @@ async def unlike_post(
     )
     like = existing.scalar_one_or_none()
     if not like:
-        return {"liked": False, "like_count": post.like_count}
+        # 未点赞，返回幂等响应
+        return {"status": "not_liked", "like_count": post.like_count}
 
+    # 删除点赞记录
     await db.delete(like)
-    post.like_count = max(0, post.like_count - 1)
+
+    # 原子性地减少点赞数（确保不低于0）
+    await db.execute(
+        sql_update(Post)
+        .where(Post.id == post_id)
+        .values(like_count=func.max(Post.like_count - 1, 0))
+    )
+
     await db.commit()
-    return {"liked": False, "like_count": post.like_count}
+
+    # 重新获取更新后的点赞数
+    await db.refresh(post)
+    return {"status": "unliked", "like_count": post.like_count}
 
 
 # ── 收藏/取消收藏 ───────────────────────────────────────

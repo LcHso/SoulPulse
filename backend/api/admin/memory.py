@@ -1,12 +1,12 @@
 """M4: Memory & Cognitive Management endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
-from api.admin.dependencies import get_current_admin_user, _to_utc_iso
+from api.admin.dependencies import get_current_admin_user, _to_utc_iso, audit_log
 
 router = APIRouter(tags=["admin-memory"])
 
@@ -96,8 +96,10 @@ async def update_memory(
 
 
 @router.delete("/memories/{memory_id}")
+@audit_log("delete_memory", "memory")
 async def delete_memory(
     memory_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin_user),
 ):

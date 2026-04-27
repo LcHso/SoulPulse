@@ -135,3 +135,13 @@ async def init_db():
                 # 列不存在，执行迁移
                 await conn.execute(text("ALTER TABLE users ADD COLUMN is_admin INTEGER DEFAULT 0"))
                 print("[database] Added is_admin column to users table")
+
+            # ── 数据库迁移：为 posts 表添加 post_type 列 ──────────────────────────────────────────
+            # post_type 用于标识帖子类型：image_only, video, carousel
+            try:
+                await conn.execute(text("SELECT post_type FROM posts LIMIT 1"))
+            except Exception:
+                await conn.execute(
+                    text("ALTER TABLE posts ADD COLUMN post_type VARCHAR(50) DEFAULT 'image_only'")
+                )
+                print("[database] Added post_type column to posts table")

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import '../api/api_client.dart';
 
 class ImageViewer extends StatelessWidget {
   final String imageUrl;
@@ -24,6 +25,7 @@ class ImageViewer extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final resolvedUrl = ApiClient.proxyImageUrl(imageUrl);
     return GestureDetector(
       onTap: () => Navigator.of(context).pop(),
       onVerticalDragEnd: (details) {
@@ -44,7 +46,7 @@ class ImageViewer extends StatelessWidget {
                     ? Hero(
                         tag: heroTag!,
                         child: CachedNetworkImage(
-                          imageUrl: imageUrl,
+                          imageUrl: resolvedUrl,
                           fit: BoxFit.contain,
                           errorWidget: (_, __, ___) => const Icon(
                             Icons.broken_image_outlined,
@@ -54,7 +56,7 @@ class ImageViewer extends StatelessWidget {
                         ),
                       )
                     : CachedNetworkImage(
-                        imageUrl: imageUrl,
+                        imageUrl: resolvedUrl,
                         fit: BoxFit.contain,
                         errorWidget: (_, __, ___) => const Icon(
                           Icons.broken_image_outlined,

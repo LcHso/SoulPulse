@@ -8,7 +8,7 @@ from sqlalchemy import select, func
 import pytz
 
 from core.database import get_db
-from core.security import get_current_user
+from core.security import get_current_user, get_current_user_optional
 from core.utils import to_utc_iso
 from models.user import User
 from models.post import Post
@@ -147,9 +147,12 @@ async def list_personas(
     category: Optional[str] = Query(None),
     q: Optional[str] = Query(None, description="Search by name, bio, or archetype"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: Optional[User] = Depends(get_current_user_optional),
 ):
-    """List all active AI personas, optionally filtered by category or search query."""
+    """List all active AI personas, optionally filtered by category or search query.
+    
+    This endpoint is public and does not require authentication.
+    """
     query = select(AIPersona).where(AIPersona.is_active == 1)
     if category:
         query = query.where(AIPersona.category == category)

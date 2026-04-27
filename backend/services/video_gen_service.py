@@ -70,6 +70,9 @@ async def generate_video(prompt: str, duration: float = 5.0) -> str:
     Returns:
         URL of the generated video.
     """
+    if not settings.ENABLE_MEDIA_GENERATION:
+        print("[video-gen] Media generation disabled, skipping")
+        return ""
     payload = {
         "model": settings.DASHSCOPE_VIDEO_MODEL,
         "input": {"prompt": prompt},
@@ -106,6 +109,9 @@ async def generate_video_with_image_ref(
     Returns:
         URL of the generated video.
     """
+    if not settings.ENABLE_MEDIA_GENERATION:
+        print("[video-gen] Media generation disabled, skipping")
+        return ""
     resolved_ref_url = _resolve_public_url(image_ref_url)
     payload = {
         "model": settings.DASHSCOPE_VIDEO_MODEL,

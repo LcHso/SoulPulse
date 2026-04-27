@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/api/api_client.dart';
+import '../../../core/theme/character_theme.dart';
 
 class StoryBar extends StatefulWidget {
   final void Function(List<dynamic> stories, int aiId)? onStoryTap;
@@ -56,25 +57,29 @@ class _StoryBarState extends State<StoryBar> {
   @override
   Widget build(BuildContext context) {
     final groups = _groupByPersona();
+    final isDark = Theme.of(context).brightness == Brightness.dark;
 
     if (!_loading && groups.isEmpty) return const SizedBox.shrink();
 
+    // Warm text colors
+    final nameTextColor =
+        isDark ? const Color(0xFFF0ECE8) : const Color(0xFF2D2926);
+    final scaffoldBg = Theme.of(context).scaffoldBackgroundColor;
+
     return Container(
-      height: 110,
+      height: 118,
       padding: const EdgeInsets.symmetric(vertical: 8),
-      decoration: BoxDecoration(
-        border: Border(
-          bottom: BorderSide(
-            color: Theme.of(context).dividerColor.withValues(alpha: 0.2),
-          ),
-        ),
-      ),
       child: _loading
-          ? const Center(
+          ? Center(
               child: SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2)))
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Theme.of(context).colorScheme.primary,
+                ),
+              ),
+            )
           : ListView.builder(
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -84,82 +89,114 @@ class _StoryBarState extends State<StoryBar> {
                 final name = group['ai_name'] as String;
                 final aiId = group['ai_id'] as int;
                 final stories = group['stories'] as List;
-                final avatarUrl = group['ai_avatar'] as String;
+                final avatarUrl =
+                    ApiClient.proxyImageUrl(group['ai_avatar'] as String);
                 final hasUnviewed = group['has_unviewed'] == true;
 
+                final characterColors = CharacterTheme.getPalette(name);
+
                 return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
                   child: GestureDetector(
                     onTap: () => widget.onStoryTap?.call(stories, aiId),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        // Avatar with gradient ring and outer glow
                         Container(
                           padding: const EdgeInsets.all(3),
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             gradient: hasUnviewed
-                                ? const LinearGradient(
-                                    colors: [
-                                      Color(0xFFF58529),
-                                      Color(0xFFDD2A7B),
-                                      Color(0xFF8134AF),
-                                    ],
-                                    begin: Alignment.topRight,
-                                    end: Alignment.bottomLeft,
+                                ? CharacterTheme.createStoryGradient(
+                                    characterColors,
+                                    brightness: isDark
+                                        ? Brightness.dark
+                                        : Brightness.light,
                                   )
                                 : null,
                             border: hasUnviewed
                                 ? null
                                 : Border.all(
-                                    color: Colors.grey[400]!, width: 1.5),
+                                    color: isDark
+                                        ? const Color(0xFF555566)
+                                        : Colors.grey[400]!,
+                                    width: 1.5),
+                            boxShadow: hasUnviewed
+                                ? [
+                                    BoxShadow(
+                                      color: characterColors.vibrant
+                                          .withValues(alpha: 0.3),
+                                      blurRadius: 6,
+                                      spreadRadius: 1,
+                                    ),
+                                  ]
+                                : null,
                           ),
                           child: Container(
                             padding: const EdgeInsets.all(2),
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              color: Theme.of(context).scaffoldBackgroundColor,
+                              color: scaffoldBg,
                             ),
                             child: avatarUrl.isNotEmpty
                                 ? CircleAvatar(
-                                    radius: 30,
-                                    backgroundColor: Colors.grey[300],
+                                    radius: 32,
+                                    backgroundColor: isDark
+                                        ? const Color(0xFF333350)
+                                        : const Color(0xFFF0ECE8),
                                     child: ClipOval(
                                       child: CachedNetworkImage(
                                         imageUrl: avatarUrl,
-                                        width: 60,
-                                        height: 60,
+                                        width: 64,
+                                        height: 64,
                                         fit: BoxFit.cover,
                                         errorWidget: (_, __, ___) => Text(
                                           name.isNotEmpty ? name[0] : 'A',
                                           style: GoogleFonts.inter(
-                                            fontSize: 22,
+                                            fontSize: 24,
                                             fontWeight: FontWeight.w600,
-                                            color: Colors.grey[700],
+                                            color: isDark
+                                                ? const Color(0xFFF0ECE8)
+                                                : const Color(0xFF2D2926),
                                           ),
                                         ),
                                       ),
                                     ),
                                   )
                                 : CircleAvatar(
-                                    radius: 30,
-                                    backgroundColor: Colors.grey[300],
+                                    radius: 32,
+                                    backgroundColor: isDark
+                                        ? const Color(0xFF333350)
+                                        : const Color(0xFFF0ECE8),
                                     child: Text(
                                       name.isNotEmpty ? name[0] : 'A',
                                       style: GoogleFonts.inter(
-                                        fontSize: 22,
+                                        fontSize: 24,
                                         fontWeight: FontWeight.w600,
-                                        color: Colors.grey[700],
+                                        color: isDark
+                                            ? const Color(0xFFF0ECE8)
+                                            : const Color(0xFF2D2926),
                                       ),
                                     ),
                                   ),
                           ),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          name,
-                          style: GoogleFonts.inter(fontSize: 12),
-                          overflow: TextOverflow.ellipsis,
+                        const SizedBox(height: 6),
+                        // Name text: Inter medium 12sp, warm text color
+                        SizedBox(
+                          width: 72,
+                          child: Text(
+                            name,
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: nameTextColor,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            maxLines: 1,
+                          ),
                         ),
                       ],
                     ),

@@ -19,12 +19,28 @@ wan2.6+ 官方端点规范:
 
 import asyncio
 import hashlib
+import random
 import uuid
 from pathlib import Path
 
 import httpx
 
 from core.config import settings
+
+# ── 图像尺寸配置 ──────────────────────────────────────────
+# 加权随机选择：40% 9:16 竖版，30% 1:1 方形，30% 16:9 横版
+ASPECT_RATIOS = [
+    ("720*1280", 0.40),   # 9:16 portrait
+    ("1024*1024", 0.30),  # 1:1 square
+    ("1280*720", 0.30),   # 16:9 landscape
+]
+
+
+def _get_random_size() -> str:
+    """根据权重随机选择图像尺寸。"""
+    sizes = [size for size, _ in ASPECT_RATIOS]
+    weights = [weight for _, weight in ASPECT_RATIOS]
+    return random.choices(sizes, weights=weights, k=1)[0]
 
 # ── DashScope API 端点 ──────────────────────────────────────────
 _BASE = "https://dashscope.aliyuncs.com/api/v1"
@@ -46,18 +62,16 @@ _STATIC_DIR = Path(__file__).parent.parent / "static" / "posts"
 
 # ── 强制质量保护 ──────────────────────────────────────────
 ENFORCED_NEGATIVE_PROMPT = (
-    "worst quality, low quality, deformed face, bad anatomy, blurry, "
-    "out of focus, ugly, duplicate, morbid, mutilated, extra fingers, "
-    "poorly drawn hands, poorly drawn face, mutation, deformed body, "
-    "mutated limbs, extra limbs, missing limbs, floating objects, "
-    "disfigured, gross proportions, malformed, bad eyes, crossed eyes, "
-    "long neck, bad teeth, distorted mouth, asymmetrical face, "
-    "low resolution, pixelated, noise, grainy, watermark, text, signature"
+    "low quality, blurry, deformed, ugly, bad anatomy, bad hands, extra fingers, "
+    "missing fingers, extra limbs, disfigured, poorly drawn face, mutation, "
+    "worst quality, watermark, text, signature, pure anime style, cartoon, "
+    "3d render, pure photorealistic, uncanny valley, overexposed, underexposed"
 )
 
 QUALITY_SUFFIX = (
-    "cinematic lighting, f/1.8, 85mm lens, high-end fashion photography, "
-    "professional color grading, 8k resolution, photorealistic, sharp details"
+    "semi-realistic digital art, stylized beauty, soft cinematic lighting, "
+    "f/1.8 lens bokeh, high-end character illustration, professional color grading, "
+    "detailed and refined, warm atmospheric tones, premium art quality"
 )
 
 DEFAULT_NEGATIVE_PROMPT = ENFORCED_NEGATIVE_PROMPT
@@ -190,12 +204,32 @@ async def _generate(payload: dict, model: str) -> list[str]:
 
 async def generate_image(
     prompt: str,
-    size: str = "1024*1024",
+    size: str | None = None,
     n: int = 1,
     persona_id: int | None = None,
     negative_prompt: str | None = None,
 ) -> list[str]:
-    """从文本提示生成图片。自动根据模型名选择 API 格式。"""
+    """从文本提示生成图片。自动根据模型名选择 API 格式。
+
+    Args:
+        prompt: 图像生成提示词
+        size: 图像尺寸（如 "720*1280"），为 None 时随机选择
+        n: 生成数量
+        persona_id: 角色ID（用于种子一致性）
+        negative_prompt: 负面提示词
+
+    Returns:
+        list[str]: 生成的图像URL列表
+    """
+    if not settings.ENABLE_MEDIA_GENERATION:
+        print("[image-gen] Media generation disabled, skipping")
+        return []
+
+    # 如果未指定尺寸，随机选择
+    if size is None:
+        size = _get_random_size()
+        print(f"[image-gen] Randomly selected size: {size}")
+
     full_prompt = f"{prompt}, {QUALITY_SUFFIX}"
     model = settings.DASHSCOPE_IMAGE_MODEL
     neg = negative_prompt or ENFORCED_NEGATIVE_PROMPT
@@ -237,7 +271,7 @@ async def generate_image(
 async def generate_image_with_face_ref(
     prompt: str,
     face_ref_url: str,
-    size: str = "720*1280",
+    size: str | None = None,
     n: int = 1,
     persona_id: int | None = None,
     negative_prompt: str | None = None,
@@ -246,7 +280,27 @@ async def generate_image_with_face_ref(
 
     wan2.6+: 在 content 数组中传入参考图 + enable_interleave=false (图像编辑模式)
     旧版: 使用 ref_image + ref_mode 参数
+
+    Args:
+        prompt: 图像生成提示词
+        face_ref_url: 面部参考图像URL
+        size: 图像尺寸（如 "720*1280"），为 None 时随机选择
+        n: 生成数量
+        persona_id: 角色ID（用于种子一致性）
+        negative_prompt: 负面提示词
+
+    Returns:
+        list[str]: 生成的图像URL列表
     """
+    if not settings.ENABLE_MEDIA_GENERATION:
+        print("[image-gen] Media generation disabled, skipping")
+        return []
+
+    # 如果未指定尺寸，随机选择
+    if size is None:
+        size = _get_random_size()
+        print(f"[image-gen] Randomly selected size: {size}")
+
     full_prompt = f"{prompt}, {QUALITY_SUFFIX}"
     model = settings.DASHSCOPE_IMAGE_MODEL
     neg = negative_prompt or ENFORCED_NEGATIVE_PROMPT
@@ -304,6 +358,9 @@ async def generate_base_portrait(
     style: str = "photorealistic",
 ) -> str:
     """生成基础肖像图, 用于角色视觉一致性系统。"""
+    if not settings.ENABLE_MEDIA_GENERATION:
+        print("[image-gen] Media generation disabled, skipping")
+        return ""
     gender_tag = "1boy" if gender == "male" else "1girl"
 
     prompt = (

@@ -68,8 +68,8 @@ class _PersonasManagementViewState
                     Center(
                       child: CircleAvatar(
                         radius: 40,
-                        backgroundImage:
-                            NetworkImage(persona['avatar_url'] as String),
+                        backgroundImage: NetworkImage(ApiClient.proxyImageUrl(
+                            persona['avatar_url'] as String)),
                       ),
                     ),
                   const SizedBox(height: 16),
@@ -215,8 +215,9 @@ class _PersonasManagementViewState
                         hasAvatar
                             ? CircleAvatar(
                                 radius: 18,
-                                backgroundImage:
-                                    NetworkImage(p['avatar_url'] as String),
+                                backgroundImage: NetworkImage(
+                                    ApiClient.proxyImageUrl(
+                                        p['avatar_url'] as String)),
                               )
                             : const CircleAvatar(
                                 radius: 18,

@@ -1,0 +1,16 @@
+[Unit]
+Description=SoulPulse Admin Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/Documents/SoulPulse/backend
+ExecStart=/usr/bin/python3 -m uvicorn main:app --host 0.0.0.0 --port 8002
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/soulpulse_admin.log
+StandardError=append:/var/log/soulpulse_admin.log
+
+[Install]
+WantedBy=multi-user.target

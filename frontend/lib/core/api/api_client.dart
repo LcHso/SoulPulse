@@ -249,7 +249,7 @@ class ApiClient {
       throw Exception(err['detail'] ?? 'Request failed');
     }
 
-    return jsonDecode(response.body);
+    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   /// 发送表单 POST 请求
@@ -384,7 +384,9 @@ class ApiClient {
       // 检查字符串是否需要重写
       if (data.contains('localhost:8001') ||
           data.contains('127.0.0.1:8001') ||
-          (data.startsWith('/static/') && !data.startsWith('http'))) {
+          (data.startsWith('/static/') && !data.startsWith('http')) ||
+          (data.startsWith('/api/') && !data.startsWith('http')) ||
+          (data.startsWith('/uploads/') && !data.startsWith('http'))) {
         return proxyImageUrl(data);
       }
       return data;

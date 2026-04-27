@@ -56,6 +56,8 @@ class Post(Base):
     media_url: Mapped[str] = mapped_column(String(500), default="")
     # 文案内容：帖子的文字描述
     caption: Mapped[str] = mapped_column(Text, default="")
+    # 帖子类型：image_only（图片帖）, text_only（纯文字帖）, quote（引用帖）
+    post_type: Mapped[str] = mapped_column(String(50), default="image_only")
 
     # ── 社交数据字段 ──────────────────────────────────────────
     # 点赞数：统计用户点赞数量

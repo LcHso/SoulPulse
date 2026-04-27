@@ -59,7 +59,8 @@ class _StoryPlayerPageState extends State<StoryPlayerPage> {
     _controller = null;
 
     final story = widget.stories[_currentIndex];
-    final mediaUrl = story['video_url'] as String? ?? '';
+    final mediaUrl =
+        ApiClient.proxyImageUrl(story['video_url'] as String? ?? '');
 
     // Mark story as viewed
     final storyId = story['id'] as int?;

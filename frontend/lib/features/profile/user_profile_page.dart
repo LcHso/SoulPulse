@@ -4,19 +4,35 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/providers/auth_provider.dart';
+import '../../core/providers/notification_provider.dart';
 import '../../core/api/api_client.dart';
 
 final _interactionsProvider = FutureProvider<List<dynamic>>((ref) async {
   return ApiClient.getList('/api/ai/interactions/summary');
 });
 
-class UserProfilePage extends ConsumerWidget {
+class UserProfilePage extends ConsumerStatefulWidget {
   const UserProfilePage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<UserProfilePage> createState() => _UserProfilePageState();
+}
+
+class _UserProfilePageState extends ConsumerState<UserProfilePage> {
+  @override
+  void initState() {
+    super.initState();
+    // Load notifications to get unread count for badge
+    Future.microtask(() {
+      ref.read(notificationProvider.notifier).load();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final authState = ref.watch(authProvider);
     final interactionsAsync = ref.watch(_interactionsProvider);
+    final notificationState = ref.watch(notificationProvider);
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final user = authState.user;
 
@@ -26,9 +42,39 @@ class UserProfilePage extends ConsumerWidget {
             style:
                 GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 22)),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.notifications_outlined),
-            onPressed: () => context.push('/notifications'),
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              IconButton(
+                icon: const Icon(Icons.notifications_outlined),
+                onPressed: () => context.push('/notifications'),
+              ),
+              if (notificationState.unreadCount > 0)
+                Positioned(
+                  top: 10,
+                  right: 10,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.red,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    constraints: const BoxConstraints(minWidth: 18),
+                    child: Text(
+                      notificationState.unreadCount > 99
+                          ? '99+'
+                          : '${notificationState.unreadCount}',
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+            ],
           ),
           IconButton(
             icon: const Icon(Icons.settings_outlined),
@@ -48,7 +94,7 @@ class UserProfilePage extends ConsumerWidget {
             Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
-                color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+                color: Theme.of(context).colorScheme.surface,
                 borderRadius: BorderRadius.circular(16),
                 boxShadow: [
                   BoxShadow(
@@ -62,7 +108,7 @@ class UserProfilePage extends ConsumerWidget {
                 children: [
                   CircleAvatar(
                     radius: 36,
-                    backgroundColor: const Color(0xFF0095F6),
+                    backgroundColor: Theme.of(context).colorScheme.primary,
                     child: Text(
                       (user?['nickname'] as String? ?? 'U')[0].toUpperCase(),
                       style: GoogleFonts.inter(
@@ -113,8 +159,7 @@ class UserProfilePage extends ConsumerWidget {
             // Relationships section
             Text(
               'My Relationships',
-              style:
-                  GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 16),
+              style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 12),
 
@@ -136,7 +181,7 @@ class UserProfilePage extends ConsumerWidget {
                   return Container(
                     padding: const EdgeInsets.all(24),
                     decoration: BoxDecoration(
-                      color: isDark ? const Color(0xFF1C1C1E) : Colors.grey[50],
+                      color: Theme.of(context).colorScheme.surface,
                       borderRadius: BorderRadius.circular(12),
                     ),
                     child: Column(
@@ -203,7 +248,7 @@ class _RelationshipCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final name = item['ai_name'] as String? ?? 'AI';
-    final avatar = item['ai_avatar'] as String? ?? '';
+    final avatar = ApiClient.proxyImageUrl(item['ai_avatar'] as String? ?? '');
     final level = item['intimacy_level'] as String? ?? 'Stranger';
     final mood = emotionHint['mood'] as String? ?? 'neutral';
 
@@ -213,7 +258,7 @@ class _RelationshipCard extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+          color: Theme.of(context).colorScheme.surface,
           borderRadius: BorderRadius.circular(12),
           boxShadow: [
             BoxShadow(
@@ -250,14 +295,14 @@ class _RelationshipCard extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 6, vertical: 2),
                         decoration: BoxDecoration(
-                          color: _levelColor(level).withAlpha(30),
+                          color: _levelColor(context, level).withAlpha(30),
                           borderRadius: BorderRadius.circular(8),
                         ),
                         child: Text(level,
                             style: GoogleFonts.inter(
                                 fontSize: 10,
                                 fontWeight: FontWeight.w600,
-                                color: _levelColor(level))),
+                                color: _levelColor(context, level))),
                       ),
                     ],
                   ),
@@ -272,8 +317,8 @@ class _RelationshipCard extends StatelessWidget {
                             value: intimacy / 10.0,
                             backgroundColor:
                                 isDark ? Colors.grey[800] : Colors.grey[200],
-                            valueColor:
-                                AlwaysStoppedAnimation(_levelColor(level)),
+                            valueColor: AlwaysStoppedAnimation(
+                                _levelColor(context, level)),
                             minHeight: 6,
                           ),
                         ),
@@ -307,14 +352,14 @@ class _RelationshipCard extends StatelessWidget {
     );
   }
 
-  Color _levelColor(String level) {
+  Color _levelColor(BuildContext context, String level) {
     switch (level) {
       case 'Soulmate':
         return Colors.pink;
       case 'Close Friend':
         return Colors.purple;
       case 'Friend':
-        return const Color(0xFF0095F6);
+        return Theme.of(context).colorScheme.primary;
       case 'Acquaintance':
         return Colors.green;
       default:

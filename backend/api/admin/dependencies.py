@@ -62,7 +62,7 @@ def audit_log(action: str, target_type: str):
                     from models.admin_audit_log import AdminAuditLog
                     ip = request.client.host if request and request.client else ""
                     target_id = ""
-                    for key in ("persona_id", "post_id", "user_id", "entry_id", "config_id"):
+                    for key in ("persona_id", "post_id", "user_id", "entry_id", "config_id", "memory_id"):
                         if key in kwargs:
                             target_id = str(kwargs[key])
                             break

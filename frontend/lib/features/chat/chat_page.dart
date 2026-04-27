@@ -27,6 +27,7 @@ import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
+import '../../core/theme/character_theme.dart';
 
 /// 聊天页面组件
 ///
@@ -108,6 +109,12 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   /// AI 当前情绪状态（用于状态栏显示）
   String? _emotionMood;
 
+  /// AI 能量等级 (tired / normal / energetic)
+  String? _energyLevel;
+
+  /// AI 是否在思念用户
+  bool _longing = false;
+
   /// AI 角色本地时间（如 "22:30"）
   String? _personaLocalTime;
 
@@ -172,6 +179,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (mounted) {
         setState(() {
           _emotionMood = data['mood'] as String?;
+          _energyLevel = data['energy_level'] as String?;
+          _longing = (data['longing'] as bool?) ?? false;
           _personaLocalTime = data['persona_local_time'] as String?;
           _personaTimezone = data['persona_timezone'] as String?;
         });
@@ -669,6 +678,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
+    final characterColors = CharacterTheme.getPalette(widget.aiName);
 
     return Scaffold(
       appBar: AppBar(
@@ -687,14 +697,24 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           },
           child: Row(
             children: [
-              /// AI 头像
-              CircleAvatar(
-                radius: 16,
-                backgroundColor: Colors.grey[300],
-                child: Text(
-                  widget.aiName[0], // 显示名称首字母
-                  style: GoogleFonts.inter(
-                      fontWeight: FontWeight.w600, color: Colors.grey[700]),
+              /// AI 头像 with character-colored border
+              Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(
+                    color: characterColors.primary,
+                    width: 2,
+                  ),
+                ),
+                child: CircleAvatar(
+                  radius: 14,
+                  backgroundColor: Colors.grey[300],
+                  child: Text(
+                    widget.aiName[0], // 显示名称首字母
+                    style: GoogleFonts.inter(
+                        fontWeight: FontWeight.w600, color: Colors.grey[700]),
+                  ),
                 ),
               ),
 
@@ -705,11 +725,27 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    /// AI 名称
-                    Text(
-                      widget.aiName,
-                      style: GoogleFonts.inter(
-                          fontSize: 16, fontWeight: FontWeight.w600),
+                    /// AI 名称 with character color and accent dot
+                    Row(
+                      children: [
+                        Container(
+                          width: 6,
+                          height: 6,
+                          decoration: BoxDecoration(
+                            color: characterColors.primary,
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          widget.aiName,
+                          style: GoogleFonts.inter(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                            color: characterColors.primary,
+                          ),
+                        ),
+                      ],
                     ),
 
                     /// 连接状态指示
@@ -756,9 +792,34 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             ],
           ),
         ),
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(2),
+          child: Container(
+            height: 2,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  characterColors.primary.withValues(alpha: 0.0),
+                  characterColors.primary.withValues(alpha: 0.3),
+                  characterColors.primary.withValues(alpha: 0.0),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
       body: Column(
         children: [
+          // ================== 情绪状态栏 ==================
+          /// 显示 AI 当前能量、心情和思念状态
+          _EmotionStatusBar(
+            energyLevel: _energyLevel,
+            mood: _emotionMood,
+            longing: _longing,
+            characterColors: characterColors,
+            isConnected: _connectionStatus == WsConnectionStatus.connected,
+          ),
+
           // ================== 顶部加载指示器 ==================
           /// 分页加载历史消息时显示
           if (_loadingHistory)
@@ -803,17 +864,42 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                           if (showDate)
                             Padding(
                               padding: const EdgeInsets.symmetric(vertical: 12),
-                              child: Text(
-                                _formatDateSeparator(msg.timestamp),
-                                style: GoogleFonts.inter(
-                                    fontSize: 12, color: Colors.grey[500]),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Container(
+                                      height: 1,
+                                      color: Colors.grey.withValues(alpha: 0.3),
+                                    ),
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12),
+                                    child: Text(
+                                      _formatDateSeparator(msg.timestamp),
+                                      style: GoogleFonts.inter(
+                                          fontSize: 12,
+                                          color: Colors.grey[500]),
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Container(
+                                      height: 1,
+                                      color: Colors.grey.withValues(alpha: 0.3),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
 
                           /// 消息气泡（长按显示操作菜单）
                           GestureDetector(
                             onLongPress: () => _showMessageMenu(index),
-                            child: _MessageBubble(msg: msg, isDark: isDark),
+                            child: _MessageBubble(
+                              msg: msg,
+                              isDark: isDark,
+                              characterColors: characterColors,
+                            ),
                           ),
                         ],
                       );
@@ -831,6 +917,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                 child: _TypingIndicator(
                   animationController: _typingAnimCtrl,
                   aiName: widget.aiName,
+                  dotColor: characterColors.primary,
                 ),
               ),
             ),
@@ -839,9 +926,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
           Container(
             padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
             decoration: BoxDecoration(
-              color: isDark ? const Color(0xFF121212) : Colors.white,
+              color: Theme.of(context).colorScheme.surface,
               border: Border(
-                top: BorderSide(color: Colors.grey.withValues(alpha: 0.2)),
+                top: BorderSide(
+                  color: Theme.of(context).dividerTheme.color ??
+                      Theme.of(context)
+                          .colorScheme
+                          .outline
+                          .withValues(alpha: 0.2),
+                ),
               ),
             ),
             child: SafeArea(
@@ -858,12 +951,33 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                         hintText: 'Message...',
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide.none,
+                          borderSide: BorderSide(
+                            color: Theme.of(context).dividerTheme.color ??
+                                Theme.of(context)
+                                    .colorScheme
+                                    .outline
+                                    .withValues(alpha: 0.3),
+                          ),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide(
+                            color: Theme.of(context).dividerTheme.color ??
+                                Theme.of(context)
+                                    .colorScheme
+                                    .outline
+                                    .withValues(alpha: 0.3),
+                          ),
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide(
+                            color: Theme.of(context).colorScheme.primary,
+                            width: 1,
+                          ),
                         ),
                         filled: true,
-                        fillColor: isDark
-                            ? const Color(0xFF262626)
-                            : const Color(0xFFEFEFEF),
+                        fillColor: Theme.of(context).colorScheme.surface,
                         contentPadding: const EdgeInsets.symmetric(
                             horizontal: 20, vertical: 10),
                       ),
@@ -877,8 +991,8 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                     onTap: _sending ? null : _send,
                     child: Container(
                       padding: const EdgeInsets.all(10),
-                      decoration: const BoxDecoration(
-                        color: Color(0xFF0095F6), // Instagram 蓝色
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.primary,
                         shape: BoxShape.circle,
                       ),
                       child:
@@ -901,7 +1015,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 //
 /// 显示 AI 正在输入的动画指示器
 ///
-/// 使用三个动态缩放的圆点模拟输入效果
+/// 使用三个动态弹跳的圆点模拟输入效果
 class _TypingIndicator extends StatelessWidget {
   /// 动画控制器
   final AnimationController animationController;
@@ -909,9 +1023,15 @@ class _TypingIndicator extends StatelessWidget {
   /// AI 名称（用于显示前缀文本）
   final String aiName;
 
+  /// 圆点颜色
+  final Color dotColor;
+
   /// 构造函数
-  const _TypingIndicator(
-      {required this.animationController, required this.aiName});
+  const _TypingIndicator({
+    required this.animationController,
+    required this.aiName,
+    this.dotColor = Colors.grey,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -920,7 +1040,7 @@ class _TypingIndicator extends StatelessWidget {
       children: [
         /// AI 名称前缀
         Text(
-          '$aiName ',
+          '$aiName is typing ',
           style: GoogleFonts.inter(
               fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
         ),
@@ -929,28 +1049,33 @@ class _TypingIndicator extends StatelessWidget {
         AnimatedBuilder(
           animation: animationController,
           builder: (context, child) {
-            final progress = animationController.value;
-
             return Row(
               mainAxisSize: MainAxisSize.min,
               children: List.generate(3, (i) {
-                // 每个圆点有不同的延迟，创建波浪效果
-                final delay = i * 0.2;
+                // 每个圆点有不同的延迟，创建波浪弹跳效果
+                final delay = i * 0.15;
+                final progress = (animationController.value - delay) % 1.0;
 
-                // 计算当前圆点的透明度和缩放比例
-                final opacity = ((progress - delay) % 1.0).clamp(0.0, 1.0);
-                final scale = 0.5 + (opacity > 0.5 ? 1.0 - opacity : opacity);
+                // 使用正弦波创建弹跳效果
+                final bounce = (progress < 0.5)
+                    ? progress * 2 // 上升阶段
+                    : 2 - progress * 2; // 下降阶段
+
+                // 弹跳高度（向上移动）
+                final yOffset = -bounce * 4;
+
+                // 透明度变化
+                final opacity = 0.4 + bounce * 0.6;
 
                 return Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 1),
-                  child: Transform.scale(
-                    scale: scale,
+                  padding: const EdgeInsets.symmetric(horizontal: 1.5),
+                  child: Transform.translate(
+                    offset: Offset(0, yOffset),
                     child: Container(
                       width: 6,
                       height: 6,
                       decoration: BoxDecoration(
-                        color:
-                            Colors.grey.withValues(alpha: 0.4 + opacity * 0.6),
+                        color: dotColor.withValues(alpha: opacity),
                         shape: BoxShape.circle,
                       ),
                     ),
@@ -961,6 +1086,189 @@ class _TypingIndicator extends StatelessWidget {
           },
         ),
       ],
+    );
+  }
+}
+
+// ============================================================================
+// 情绪状态栏组件
+// ============================================================================
+//
+/// 显示 AI 当前情绪状态的紧凑状态栏
+///
+/// 包含：
+/// - 能量指示条（能量等级）
+/// - 心情表情符号
+/// - 思念指示器（可选）
+class _EmotionStatusBar extends StatelessWidget {
+  /// 能量等级: "tired" / "normal" / "energetic"
+  final String? energyLevel;
+
+  /// 心情: "melancholic" / "subdued" / "neutral" / "good" / "joyful"
+  final String? mood;
+
+  /// 是否在思念用户
+  final bool longing;
+
+  /// 角色配色
+  final CharacterColors characterColors;
+
+  /// 是否已连接
+  final bool isConnected;
+
+  const _EmotionStatusBar({
+    required this.energyLevel,
+    required this.mood,
+    required this.longing,
+    required this.characterColors,
+    required this.isConnected,
+  });
+
+  /// 获取能量等级对应的填充比例
+  double _getEnergyFill() {
+    switch (energyLevel) {
+      case 'tired':
+        return 0.25;
+      case 'normal':
+        return 0.6;
+      case 'energetic':
+        return 1.0;
+      default:
+        return 0.6;
+    }
+  }
+
+  /// 获取能量等级对应的颜色
+  Color _getEnergyColor() {
+    switch (energyLevel) {
+      case 'tired':
+        return Colors.grey;
+      case 'normal':
+        return Colors.blue;
+      case 'energetic':
+        return Colors.green;
+      default:
+        return Colors.blue;
+    }
+  }
+
+  /// 获取心情对应的表情符号
+  String _getMoodEmoji() {
+    switch (mood) {
+      case 'melancholic':
+        return '😔';
+      case 'subdued':
+        return '😐';
+      case 'neutral':
+        return '🙂';
+      case 'good':
+        return '😊';
+      case 'joyful':
+        return '😄';
+      default:
+        return '🙂';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+
+    // 未连接时不显示状态栏
+    if (!isConnected) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      decoration: BoxDecoration(
+        color: isDark
+            ? characterColors.primary.withValues(alpha: 0.1)
+            : characterColors.primary.withValues(alpha: 0.05),
+        border: Border(
+          bottom: BorderSide(
+            color: characterColors.primary.withValues(alpha: 0.1),
+            width: 1,
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          /// 能量指示条
+          Expanded(
+            child: Row(
+              children: [
+                /// 能量图标
+                Icon(
+                  Icons.bolt,
+                  size: 12,
+                  color: _getEnergyColor(),
+                ),
+                const SizedBox(width: 4),
+
+                /// 能量进度条
+                Expanded(
+                  child: Container(
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                    child: FractionallySizedBox(
+                      alignment: Alignment.centerLeft,
+                      widthFactor: _getEnergyFill(),
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: _getEnergyColor(),
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(width: 12),
+
+          /// 心情表情
+          Text(
+            _getMoodEmoji(),
+            style: const TextStyle(fontSize: 14),
+          ),
+
+          /// 思念指示器
+          if (longing) ...[
+            const SizedBox(width: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: characterColors.accent.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '💭',
+                    style: const TextStyle(fontSize: 10),
+                  ),
+                  const SizedBox(width: 2),
+                  Text(
+                    'Missing you',
+                    style: GoogleFonts.inter(
+                      fontSize: 9,
+                      color: characterColors.primary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -1053,8 +1361,15 @@ class _MessageBubble extends StatelessWidget {
   /// 是否为深色模式
   final bool isDark;
 
+  /// 角色配色
+  final CharacterColors characterColors;
+
   /// 构造函数
-  const _MessageBubble({required this.msg, required this.isDark});
+  const _MessageBubble({
+    required this.msg,
+    required this.isDark,
+    required this.characterColors,
+  });
 
   /// 格式化时间显示
   ///
@@ -1154,7 +1469,7 @@ class _MessageBubble extends StatelessWidget {
                 child: Text(
                   _formatTime(msg.timestamp),
                   style:
-                      GoogleFonts.inter(fontSize: 10, color: Colors.grey[500]),
+                      GoogleFonts.inter(fontSize: 11, color: Colors.grey[500]),
                 ),
               ),
           ],
@@ -1167,22 +1482,20 @@ class _MessageBubble extends StatelessWidget {
 
     /// 背景颜色
     final bgColor = msg.isUser
-        ? const Color(0xFF0095F6) // 用户消息：Instagram 蓝色
+        ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.10)
         : msg.isError
             ? Colors.red.withValues(alpha: 0.15) // 错误消息：红色半透明
-            : (isDark
-                ? const Color(0xFF262626)
-                : const Color(0xFFEFEFEF)); // AI 回复：灰色
+            : characterColors.primary
+                .withValues(alpha: isDark ? 0.12 : 0.08); // AI 回复：角色主色低透明度
 
     /// 文字颜色
-    final textColor = msg.isUser
-        ? Colors.white
-        : msg.isError
-            ? Colors.red
-            : (isDark ? Colors.white : Colors.black);
+    final textColor =
+        msg.isError ? Colors.red : Theme.of(context).colorScheme.onSurface;
 
     /// 时间戳颜色
-    final timeColor = msg.isUser ? Colors.white70 : Colors.grey[500];
+    final timeColor = msg.isError
+        ? Colors.red.withValues(alpha: 0.7)
+        : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.5);
 
     return Align(
       // 用户消息右对齐，AI 消息左对齐
@@ -1218,7 +1531,7 @@ class _MessageBubble extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4),
                 child: Text(
                   _formatTime(msg.timestamp),
-                  style: GoogleFonts.inter(fontSize: 10, color: timeColor),
+                  style: GoogleFonts.inter(fontSize: 11, color: timeColor),
                 ),
               ),
           ],

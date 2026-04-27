@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,8 +93,10 @@ async def list_pending_posts(
 
 
 @router.post("/posts/{post_id}/approve")
+@audit_log("approve_post", "post")
 async def approve_post(
     post_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin_user),
 ):
@@ -130,8 +132,10 @@ async def approve_post(
 
 
 @router.post("/posts/{post_id}/reject")
+@audit_log("reject_post", "post")
 async def reject_post(
     post_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     admin=Depends(get_current_admin_user),
 ):
@@ -147,6 +151,92 @@ async def reject_post(
     post.status = 2
     await db.commit()
     return {"message": "Post rejected", "post_id": post_id, "status": 2}
+
+
+class BatchPostIds(BaseModel):
+    post_ids: list[int]
+
+
+@router.post("/posts/batch-approve")
+@audit_log("batch_approve_posts", "post")
+async def batch_approve_posts(
+    request: Request,
+    body: BatchPostIds,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin_user),
+):
+    from models.post import Post
+    from models.ai_persona import AIPersona
+    from models.follow import Follow
+    from models.notification import Notification
+
+    approved_count = 0
+    failed_ids = []
+
+    for post_id in body.post_ids:
+        try:
+            result = await db.execute(select(Post).where(Post.id == post_id))
+            post = result.scalar_one_or_none()
+            if not post:
+                failed_ids.append(post_id)
+                continue
+            if post.status != 0:
+                failed_ids.append(post_id)
+                continue
+
+            post.status = 1
+            approved_count += 1
+
+            # Send follower notifications (same as single approve)
+            persona_r = await db.execute(select(AIPersona).where(AIPersona.id == post.ai_id))
+            persona = persona_r.scalar_one_or_none()
+            if persona:
+                follower_r = await db.execute(select(Follow.user_id).where(Follow.ai_id == persona.id))
+                for (uid,) in follower_r.all():
+                    db.add(Notification(
+                        user_id=uid, type="new_post",
+                        title=f"{persona.name} shared a new post",
+                        body=post.caption[:200],
+                        data_json=f'{{"post_id": {post.id}, "ai_id": {persona.id}, "ai_name": "{persona.name}"}}',
+                    ))
+        except Exception:
+            failed_ids.append(post_id)
+
+    await db.commit()
+    return {"approved_count": approved_count, "failed_ids": failed_ids}
+
+
+@router.post("/posts/batch-reject")
+@audit_log("batch_reject_posts", "post")
+async def batch_reject_posts(
+    request: Request,
+    body: BatchPostIds,
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin_user),
+):
+    from models.post import Post
+
+    rejected_count = 0
+    failed_ids = []
+
+    for post_id in body.post_ids:
+        try:
+            result = await db.execute(select(Post).where(Post.id == post_id))
+            post = result.scalar_one_or_none()
+            if not post:
+                failed_ids.append(post_id)
+                continue
+            if post.status != 0:
+                failed_ids.append(post_id)
+                continue
+
+            post.status = 2
+            rejected_count += 1
+        except Exception:
+            failed_ids.append(post_id)
+
+    await db.commit()
+    return {"rejected_count": rejected_count, "failed_ids": failed_ids}
 
 
 @router.post("/posts/{post_id}/regenerate")

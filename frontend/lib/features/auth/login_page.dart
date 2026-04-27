@@ -130,8 +130,16 @@ class _LoginPageState extends ConsumerState<LoginPage> {
             );
       }
 
-      // 登录/注册成功，导航到信息流页面
-      if (mounted) context.go('/feed');
+      // 登录/注册成功，检查是否需要引导流程
+      if (mounted) {
+        final needsOnboarding =
+            await ref.read(authProvider.notifier).needsOnboarding();
+        if (needsOnboarding) {
+          context.go('/onboarding');
+        } else {
+          context.go('/feed');
+        }
+      }
     } catch (e) {
       // 失败时显示用户友好的错误信息
       setState(() => _error = _friendlyError(e));
@@ -309,9 +317,9 @@ class _LoginPageState extends ConsumerState<LoginPage> {
                           setState(() => _isRegister = !_isRegister),
                       child: Text(
                         _isRegister ? 'Log In' : 'Sign Up',
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontWeight: FontWeight.w600,
-                          color: Color(0xFF0095F6), // Instagram 蓝色
+                          color: Theme.of(context).colorScheme.primary,
                         ),
                       ),
                     ),

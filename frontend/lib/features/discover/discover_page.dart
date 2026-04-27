@@ -5,6 +5,8 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
 import '../../core/api/api_client.dart';
+import '../../core/theme/character_theme.dart';
+import '../../core/widgets/empty_state.dart';
 
 /// Increment to force personasProvider to refetch.
 final personasRefreshProvider = StateProvider<int>((ref) => 0);
@@ -125,18 +127,10 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
               ),
               data: (personas) {
                 if (personas.isEmpty) {
-                  return Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(Icons.person_search,
-                            size: 64, color: Colors.grey[300]),
-                        const SizedBox(height: 16),
-                        Text('No AI personas found',
-                            style: GoogleFonts.inter(
-                                fontSize: 16, color: Colors.grey)),
-                      ],
-                    ),
+                  return EmptyState(
+                    icon: Icons.explore_outlined,
+                    title: 'No companions found',
+                    subtitle: 'Check back soon for new AI personalities',
                   );
                 }
                 return GridView.builder(
@@ -163,6 +157,7 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
 
   Widget _buildChip(String label, String? category) {
     final isSelected = _selectedCategory == category;
+    final primary = Theme.of(context).colorScheme.primary;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
       child: FilterChip(
@@ -171,8 +166,8 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
         onSelected: (_) {
           setState(() => _selectedCategory = category);
         },
-        selectedColor: const Color(0xFF0095F6).withAlpha(40),
-        checkmarkColor: const Color(0xFF0095F6),
+        selectedColor: primary.withAlpha(40),
+        checkmarkColor: primary,
       ),
     );
   }
@@ -214,8 +209,10 @@ class _PersonaCard extends StatelessWidget {
     final name = persona['name'] as String? ?? 'AI';
     final bio = persona['bio'] as String? ?? '';
     final profession = persona['profession'] as String? ?? '';
-    final avatar = persona['avatar_url'] as String? ?? '';
+    final avatar =
+        ApiClient.proxyImageUrl(persona['avatar_url'] as String? ?? '');
     final archetype = persona['archetype'] as String? ?? '';
+    final characterColors = CharacterTheme.getPalette(name);
 
     return GestureDetector(
       onTap: () {
@@ -224,7 +221,16 @@ class _PersonaCard extends StatelessWidget {
       },
       child: Container(
         decoration: BoxDecoration(
-          color: isDark ? const Color(0xFF1C1C1E) : Colors.white,
+          gradient: LinearGradient(
+            colors: [
+              characterColors
+                  .getGradient1(isDark ? Brightness.dark : Brightness.light)
+                  .withValues(alpha: 0.2),
+              Theme.of(context).colorScheme.surface,
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
           borderRadius: BorderRadius.circular(16),
           boxShadow: [
             BoxShadow(
@@ -235,95 +241,92 @@ class _PersonaCard extends StatelessWidget {
           ],
         ),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            Expanded(
-              flex: 3,
-              child: ClipRRect(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(16)),
-                child: avatar.isNotEmpty
-                    ? CachedNetworkImage(
-                        imageUrl: avatar,
-                        fit: BoxFit.cover,
-                        placeholder: (_, __) => Container(
-                          color: isDark
-                              ? const Color(0xFF2C2C2E)
-                              : Colors.grey[200],
-                          child: const Center(
-                              child: CircularProgressIndicator(strokeWidth: 2)),
-                        ),
-                        errorWidget: (_, __, ___) => Container(
-                          color: isDark
-                              ? const Color(0xFF2C2C2E)
-                              : Colors.grey[200],
-                          child: Icon(Icons.person,
-                              size: 48, color: Colors.grey[400]),
-                        ),
-                      )
-                    : Container(
-                        color:
-                            isDark ? const Color(0xFF2C2C2E) : Colors.grey[200],
-                        child: Center(
-                          child: Text(name[0],
-                              style: GoogleFonts.inter(
-                                  fontSize: 40,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.grey[500])),
-                        ),
+            const SizedBox(height: 16),
+            // Prominent avatar
+            CircleAvatar(
+              radius: 32,
+              backgroundColor: Colors.grey[300],
+              backgroundImage:
+                  avatar.isNotEmpty ? CachedNetworkImageProvider(avatar) : null,
+              child: avatar.isEmpty
+                  ? Text(
+                      name[0],
+                      style: GoogleFonts.inter(
+                        fontSize: 28,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.grey[500],
                       ),
+                    )
+                  : null,
+            ),
+            const SizedBox(height: 10),
+            // Name
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Text(
+                name,
+                style: GoogleFonts.inter(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
               ),
             ),
-            Expanded(
-              flex: 2,
-              child: Padding(
-                padding: const EdgeInsets.all(10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(name,
-                        style: GoogleFonts.inter(
-                            fontWeight: FontWeight.w700, fontSize: 14),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
-                    if (profession.isNotEmpty)
-                      Text(profession,
-                          style: GoogleFonts.inter(
-                              fontSize: 11, color: Colors.grey[500]),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis),
-                    if (archetype.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0095F6).withAlpha(25),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(archetype,
-                              style: GoogleFonts.inter(
-                                  fontSize: 10,
-                                  color: const Color(0xFF0095F6),
-                                  fontWeight: FontWeight.w500),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis),
-                        ),
-                      ),
-                    const SizedBox(height: 4),
-                    Flexible(
-                      child: Text(bio,
-                          style: GoogleFonts.inter(
-                              fontSize: 11, color: Colors.grey[500]),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis),
+            if (profession.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  profession,
+                  style: GoogleFonts.inter(
+                    fontSize: 11,
+                    color: Colors.grey[500],
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            if (archetype.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: characterColors.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    archetype,
+                    style: GoogleFonts.inter(
+                      fontSize: 10,
+                      color: characterColors.primary,
+                      fontWeight: FontWeight.w500,
                     ),
-                  ],
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            const SizedBox(height: 6),
+            // Bio preview
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  bio,
+                  style: Theme.of(context).textTheme.bodySmall,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
                 ),
               ),
             ),
+            const SizedBox(height: 10),
           ],
         ),
       ),

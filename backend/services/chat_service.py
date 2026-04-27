@@ -48,7 +48,7 @@ from models.chat_message import ChatMessage
 from models.chat_summary import ChatSummary
 from models.interaction import Interaction
 from models.user import User
-from services.aliyun_ai_service import chat_with_ai, _get_client
+from services.aliyun_ai_service import chat_with_ai, _get_client, _make_character_request
 from services import (
     anchor_service,
     embedding_service,
@@ -64,6 +64,22 @@ _SUMMARY_THRESHOLD = 10
 
 # 上下文窗口中最近消息数量：传递给 LLM 作为 chat_history 的消息数
 _CONTEXT_RECENT_COUNT = 5
+
+# 欢迎消息模板（按角色名称）
+WELCOME_MESSAGE_TEMPLATES = {
+    "starlin": "嗨！终于等到你了～ 我是星野，以后多多关照呀 ✨",
+    "xingye": "嗨！终于等到你了～ 我是星野，以后多多关照呀 ✨",
+    "陆晨曦": "你好呀，我是陆晨曦。很高兴认识你，希望我们能聊得来 😊",
+    "luxiao": "你好呀，我是陆晨曦。很高兴认识你，希望我们能聊得来 😊",
+    "顾言深": "你好，我是顾言深。很高兴见到你。",
+    "guyanshen": "你好，我是顾言深。很高兴见到你。",
+    "林羽": "嗨～我是林羽！以后有什么想聊的随时找我哦 ✌️",
+    "linyu": "嗨～我是林羽！以后有什么想聊的随时找我哦 ✌️",
+    "沈墨白": "你好，我是沈墨白。期待与你的交流。",
+    "shenmobai": "你好，我是沈墨白。期待与你的交流。",
+    "纪夜辰": "终于等到你了。我是纪夜辰，希望我们的相遇不是偶然。",
+    "jiyechen": "终于等到你了。我是纪夜辰，希望我们的相遇不是偶然。",
+}
 
 
 # ── 结果类型定义 ─────────────────────────────────────────────────
@@ -172,6 +188,77 @@ async def get_history(
     messages = list(result.scalars().all())
     messages.reverse()  # 反转列表，使最旧的消息排在前面，便于显示
     return messages
+
+
+# ── 检查是否是首次聊天 ───────────────────────────────────
+
+async def check_is_first_chat(
+    db: AsyncSession,
+    user_id: int,
+    ai_id: int,
+) -> bool:
+    """
+    检查用户与 AI 是否是第一次聊天（没有历史消息）。
+
+    Args:
+        db: 异步数据库会话
+        user_id: 用户 ID
+        ai_id: AI 人格 ID
+
+    Returns:
+        bool: 如果是首次聊天返回 True，否则返回 False
+    """
+    stmt = (
+        select(func.count(ChatMessage.id))
+        .where(
+            ChatMessage.user_id == user_id,
+            ChatMessage.ai_id == ai_id,
+        )
+    )
+    result = await db.execute(stmt)
+    count = result.scalar() or 0
+    return count == 0
+
+
+async def generate_welcome_message(
+    db: AsyncSession,
+    user: User,
+    persona: AIPersona,
+) -> str:
+    """
+    生成 AI 的欢迎消息。
+
+    优先使用硬编码模板，如果没有匹配模板则使用 AI 生成。
+
+    Args:
+        db: 异步数据库会话
+        user: 当前用户
+        persona: AI 人格对象
+
+    Returns:
+        str: 欢迎消息内容
+    """
+    # 尝试从模板获取
+    welcome_msg = WELCOME_MESSAGE_TEMPLATES.get(persona.name)
+    if welcome_msg:
+        return welcome_msg
+
+    # 回退：使用 AI 生成简单的欢迎消息
+    try:
+        system_instruction = (
+            f"You are {persona.name}. {persona.personality_prompt[:200]}\n\n"
+            f"This is your FIRST message to a new user named {user.nickname}. "
+            f"Write a warm, brief welcome message (1-2 sentences) introducing yourself. "
+            f"Keep it under 50 characters. Be friendly and authentic to your character."
+        )
+        messages = [{"role": "system", "content": system_instruction}]
+        welcome_msg = await _make_character_request(
+            messages, persona.personality_prompt, temperature=0.7, max_tokens=100
+        )
+        return welcome_msg.strip()
+    except Exception:
+        logger.warning("Failed to generate welcome message, using fallback")
+        return f"你好，我是{persona.name}。很高兴认识你！"
 
 
 # ── 未投递的主动私信 ───────────────────────────────────

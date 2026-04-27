@@ -201,7 +201,8 @@ class _PostDetailPageState extends State<PostDetailPage> {
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
-    final mediaUrl = widget.post['media_url'] as String? ?? '';
+    final mediaUrl =
+        ApiClient.proxyImageUrl(widget.post['media_url'] as String? ?? '');
     final caption = widget.post['caption'] as String? ?? '';
     final createdAt = widget.post['created_at'] as String?;
 
@@ -228,7 +229,8 @@ class _PostDetailPageState extends State<PostDetailPage> {
                     onTap: _openProfile,
                     child: Row(
                       children: [
-                        _buildAvatar(widget.aiAvatar, widget.aiName, 16),
+                        _buildAvatar(ApiClient.proxyImageUrl(widget.aiAvatar),
+                            widget.aiName, 16),
                         const SizedBox(width: 10),
                         Text(widget.aiName,
                             style: GoogleFonts.inter(
@@ -389,8 +391,8 @@ class _PostDetailPageState extends State<PostDetailPage> {
                     final comment = c as Map<String, dynamic>;
                     final isAi = comment['is_ai_reply'] == true;
                     final authorName = comment['author_name'] as String? ?? '';
-                    final authorAvatar =
-                        comment['author_avatar'] as String? ?? '';
+                    final authorAvatar = ApiClient.proxyImageUrl(
+                        comment['author_avatar'] as String? ?? '');
                     final content = comment['content'] as String? ?? '';
                     final commentCreatedAt =
                         comment['created_at'] as String? ?? '';

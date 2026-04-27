@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -7,6 +6,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import '../../core/providers/notification_provider.dart';
 import '../../core/services/local_notification_service.dart';
+import '../../core/widgets/empty_state.dart';
 
 class NotificationPage extends ConsumerStatefulWidget {
   const NotificationPage({super.key});
@@ -23,10 +23,8 @@ class _NotificationPageState extends ConsumerState<NotificationPage> {
       await ref.read(notificationProvider.notifier).load();
       // Reset poll baseline so already-seen notifications
       // don't re-trigger system notifications
-      if (!kIsWeb) {
-        final state = ref.read(notificationProvider);
-        LocalNotificationService.resetUnreadBaseline(state.unreadCount);
-      }
+      final state = ref.read(notificationProvider);
+      LocalNotificationService.resetUnreadBaseline(state.unreadCount);
     });
   }
 
@@ -122,18 +120,11 @@ class _NotificationPageState extends ConsumerState<NotificationPage> {
       body: state.isLoading && state.notifications.isEmpty
           ? const Center(child: CircularProgressIndicator())
           : state.notifications.isEmpty
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.notifications_none,
-                          size: 64, color: Colors.grey[300]),
-                      const SizedBox(height: 16),
-                      Text('No notifications yet',
-                          style: GoogleFonts.inter(
-                              fontSize: 16, color: Colors.grey)),
-                    ],
-                  ),
+              ? EmptyState(
+                  icon: Icons.notifications_none,
+                  title: 'All caught up!',
+                  subtitle:
+                      "You'll see notifications here when your AI companions interact with you",
                 )
               : RefreshIndicator(
                   onRefresh: () =>
@@ -193,7 +184,8 @@ class _NotificationPageState extends ConsumerState<NotificationPage> {
                                   width: 8,
                                   height: 8,
                                   decoration: BoxDecoration(
-                                    color: const Color(0xFF0095F6),
+                                    color:
+                                        Theme.of(context).colorScheme.primary,
                                     shape: BoxShape.circle,
                                   ),
                                 )
@@ -228,7 +220,7 @@ class _NotificationPageState extends ConsumerState<NotificationPage> {
   Color _typeColor(String type) {
     switch (type) {
       case 'comment_reply':
-        return const Color(0xFF0095F6);
+        return Theme.of(context).colorScheme.primary;
       case 'proactive_dm':
         return Colors.pink;
       case 'intimacy_upgrade':

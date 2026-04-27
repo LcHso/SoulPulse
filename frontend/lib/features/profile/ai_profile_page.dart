@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:go_router/go_router.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/api/api_client.dart';
+import '../../core/theme/character_theme.dart';
 
 class AIProfilePage extends StatefulWidget {
   final int aiId;
@@ -99,7 +100,8 @@ class _AIProfilePageState extends State<AIProfilePage> {
     await context.push('/post-detail', extra: {
       'post': post,
       'aiName': post['ai_name'] ?? _profile?['name'] ?? widget.aiName,
-      'aiAvatar': post['ai_avatar'] ?? _profile?['avatar_url'] ?? '',
+      'aiAvatar': ApiClient.proxyImageUrl(
+          (post['ai_avatar'] ?? _profile?['avatar_url'] ?? '') as String),
     });
     // Refresh profile when returning from post detail (like counts may change)
     if (mounted) _loadProfile();
@@ -156,63 +158,129 @@ class _AIProfilePageState extends State<AIProfilePage> {
     final isFollowing = profile['is_following'] == true;
     final intimacyLevel = profile['intimacy_level'] as String?;
     final intimacyScore = (profile['intimacy_score'] as num?)?.toDouble();
-    final avatarUrl = profile['avatar_url'] as String? ?? '';
+    final avatarUrl =
+        ApiClient.proxyImageUrl(profile['avatar_url'] as String? ?? '');
+
+    // Get character-specific colors
+    final characterColors = CharacterTheme.getPalette(name);
 
     return CustomScrollView(
       slivers: [
+        // Hero header with gradient
+        SliverToBoxAdapter(
+          child: Container(
+            height: 200,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: [
+                  characterColors.getGradient1(
+                      isDark ? Brightness.dark : Brightness.light),
+                  characterColors.primary,
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      _buildProfileAvatar(
+                        avatarUrl,
+                        name,
+                        43,
+                        borderColor: Colors.white,
+                        borderWidth: 3,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Text(
+                          name,
+                          style: Theme.of(context)
+                              .textTheme
+                              .displaySmall
+                              ?.copyWith(color: Colors.white),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+
+        // Stats card
+        SliverToBoxAdapter(
+          child: Container(
+            margin: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surface,
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withAlpha(isDark ? 40 : 15),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                _buildStatColumn('$postCount', 'Posts'),
+                _buildStatColumn('$followerCount', 'Followers'),
+                if (intimacyLevel != null)
+                  _buildStatColumn(
+                    intimacyScore != null
+                        ? intimacyScore.toStringAsFixed(1)
+                        : '--',
+                    'Intimacy',
+                  ),
+              ],
+            ),
+          ),
+        ),
+
+        // Bio, chips, intimacy, buttons
         SliverToBoxAdapter(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Top row: avatar + stats
-                Row(
-                  children: [
-                    _buildProfileAvatar(avatarUrl, name, 42),
-                    const SizedBox(width: 24),
-                    Expanded(
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                        children: [
-                          _buildStatColumn('$postCount', 'Posts'),
-                          _buildStatColumn('$followerCount', 'Followers'),
-                          if (intimacyLevel != null)
-                            _buildStatColumn(
-                              intimacyScore != null
-                                  ? intimacyScore.toStringAsFixed(1)
-                                  : '--',
-                              'Intimacy',
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 14),
-
-                // Name + profession
-                Text(name,
-                    style: GoogleFonts.inter(
-                        fontWeight: FontWeight.w700, fontSize: 15)),
                 if (profession.isNotEmpty)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Text(profession,
-                        style: GoogleFonts.inter(
-                            fontSize: 13, color: Colors.grey[600])),
+                  Text(
+                    profession,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
                   ),
 
                 // Bio
                 if (bio.isNotEmpty)
                   Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(bio, style: GoogleFonts.inter(fontSize: 14)),
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Text(
+                      bio,
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                            color: Theme.of(context)
+                                .colorScheme
+                                .onSurface
+                                .withValues(alpha: 0.8),
+                          ),
+                    ),
                   ),
 
                 // Status label + emotion
-                const SizedBox(height: 8),
+                const SizedBox(height: 12),
                 Wrap(
                   spacing: 8,
                   runSpacing: 4,
@@ -242,18 +310,38 @@ class _AIProfilePageState extends State<AIProfilePage> {
                       _buildChip(
                         icon: _intimacyIcon(intimacyLevel),
                         iconSize: 14,
-                        iconColor: _intimacyColor(intimacyLevel),
+                        iconColor: characterColors.primary,
                         label: intimacyLevel,
-                        bgColor: _intimacyColor(intimacyLevel)
-                            .withValues(alpha: 0.1),
-                        textColor: _intimacyColor(intimacyLevel),
+                        bgColor: characterColors.primary.withValues(alpha: 0.1),
+                        textColor: characterColors.primary,
                       ),
                   ],
                 ),
 
-                // Intimacy progress bar
+                // Relationship section with progress bar
                 if (intimacyScore != null) ...[
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 16),
+                  // Relationship label
+                  Row(
+                    children: [
+                      Icon(
+                        _intimacyIcon(intimacyLevel ?? 'Stranger'),
+                        size: 16,
+                        color: characterColors.primary,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Relationship: ${intimacyLevel ?? "Stranger"}',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: characterColors.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  // Progress bar
                   Row(
                     children: [
                       Expanded(
@@ -261,17 +349,17 @@ class _AIProfilePageState extends State<AIProfilePage> {
                           borderRadius: BorderRadius.circular(4),
                           child: LinearProgressIndicator(
                             value: (intimacyScore / 10.0).clamp(0.0, 1.0),
-                            minHeight: 4,
+                            minHeight: 6,
                             backgroundColor:
                                 isDark ? Colors.grey[800] : Colors.grey[200],
-                            valueColor: AlwaysStoppedAnimation(
-                                _intimacyColor(intimacyLevel ?? '')),
+                            valueColor:
+                                AlwaysStoppedAnimation(characterColors.primary),
                           ),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
-                        '${intimacyScore.toStringAsFixed(1)}/10',
+                        '${intimacyScore.toStringAsFixed(1)} / 10.0',
                         style: GoogleFonts.inter(
                             fontSize: 11, color: Colors.grey[500]),
                       ),
@@ -279,7 +367,7 @@ class _AIProfilePageState extends State<AIProfilePage> {
                   ),
                 ],
 
-                const SizedBox(height: 14),
+                const SizedBox(height: 16),
 
                 // Action buttons: Follow + Message
                 Row(
@@ -314,7 +402,8 @@ class _AIProfilePageState extends State<AIProfilePage> {
                               : ElevatedButton(
                                   onPressed: _toggleFollow,
                                   style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF0095F6),
+                                    backgroundColor:
+                                        Theme.of(context).colorScheme.primary,
                                     foregroundColor: Colors.white,
                                     shape: RoundedRectangleBorder(
                                         borderRadius: BorderRadius.circular(8)),
@@ -347,6 +436,7 @@ class _AIProfilePageState extends State<AIProfilePage> {
                     ),
                   ],
                 ),
+                const SizedBox(height: 8),
               ],
             ),
           ),
@@ -394,15 +484,22 @@ class _AIProfilePageState extends State<AIProfilePage> {
                 delegate: SliverChildBuilderDelegate(
                   (context, index) {
                     final post = posts[index] as Map<String, dynamic>;
-                    final mediaUrl = post['media_url'] as String? ?? '';
+                    final mediaUrl = ApiClient.proxyImageUrl(
+                        post['media_url'] as String? ?? '');
                     final isLocked = post['is_locked'] == true;
 
                     if (isLocked) {
+                      // Calculate required intimacy to unlock (close friend = 6.0)
+                      const unlockThreshold = 6.0;
+                      final currentScore = intimacyScore ?? 0.0;
+                      final needed =
+                          (unlockThreshold - currentScore).clamp(0.0, 10.0);
+
                       return GestureDetector(
                         onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content:
-                                  Text('Raise intimacy to Lv.6 to unlock')),
+                          SnackBar(
+                              content: Text(
+                                  'Raise intimacy by ${needed.toStringAsFixed(1)} to unlock')),
                         ),
                         child: Container(
                           color: isDark
@@ -424,6 +521,11 @@ class _AIProfilePageState extends State<AIProfilePage> {
                                         color: isDark
                                             ? Colors.white54
                                             : Colors.grey[600])),
+                                Text('+${needed.toStringAsFixed(1)} to unlock',
+                                    style: GoogleFonts.inter(
+                                        fontSize: 10,
+                                        color: characterColors.primary
+                                            .withValues(alpha: 0.8))),
                               ],
                             ),
                           ),
@@ -472,39 +574,57 @@ class _AIProfilePageState extends State<AIProfilePage> {
     );
   }
 
-  Widget _buildProfileAvatar(String url, String name, double radius) {
-    if (url.isNotEmpty) {
-      return CircleAvatar(
-        radius: radius,
-        backgroundColor: Colors.grey[300],
-        child: ClipOval(
-          child: CachedNetworkImage(
-            imageUrl: url,
-            width: radius * 2,
-            height: radius * 2,
-            fit: BoxFit.cover,
-            errorWidget: (_, __, ___) => Text(
+  Widget _buildProfileAvatar(
+    String url,
+    String name,
+    double radius, {
+    Color? borderColor,
+    double borderWidth = 2.5,
+  }) {
+    final avatar = url.isNotEmpty
+        ? CircleAvatar(
+            radius: radius - borderWidth,
+            backgroundColor: Colors.grey[300],
+            child: ClipOval(
+              child: CachedNetworkImage(
+                imageUrl: url,
+                width: (radius - borderWidth) * 2,
+                height: (radius - borderWidth) * 2,
+                fit: BoxFit.cover,
+                errorWidget: (_, __, ___) => Text(
+                  name.isNotEmpty ? name[0] : 'A',
+                  style: GoogleFonts.inter(
+                      fontSize: radius * 0.75,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey[700]),
+                ),
+              ),
+            ),
+          )
+        : CircleAvatar(
+            radius: radius - borderWidth,
+            backgroundColor: Colors.grey[300],
+            child: Text(
               name.isNotEmpty ? name[0] : 'A',
               style: GoogleFonts.inter(
                   fontSize: radius * 0.75,
                   fontWeight: FontWeight.w600,
                   color: Colors.grey[700]),
             ),
-          ),
+          );
+
+    // Wrap with colored border if borderColor is provided
+    if (borderColor != null) {
+      return Container(
+        padding: EdgeInsets.all(borderWidth / 2),
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: borderColor, width: borderWidth),
         ),
+        child: avatar,
       );
     }
-    return CircleAvatar(
-      radius: radius,
-      backgroundColor: Colors.grey[300],
-      child: Text(
-        name.isNotEmpty ? name[0] : 'A',
-        style: GoogleFonts.inter(
-            fontSize: radius * 0.75,
-            fontWeight: FontWeight.w600,
-            color: Colors.grey[700]),
-      ),
-    );
+    return avatar;
   }
 
   Widget _buildChip({
@@ -595,21 +715,6 @@ class _AIProfilePageState extends State<AIProfilePage> {
         return Icons.handshake;
       default:
         return Icons.person_outline;
-    }
-  }
-
-  Color _intimacyColor(String level) {
-    switch (level) {
-      case 'Soulmate':
-        return Colors.pink;
-      case 'Close Friend':
-        return Colors.purple;
-      case 'Friend':
-        return Colors.blue;
-      case 'Acquaintance':
-        return Colors.teal;
-      default:
-        return Colors.grey;
     }
   }
 }

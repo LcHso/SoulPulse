@@ -28,7 +28,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/auth_provider.dart';
 import '../../features/shell/app_shell.dart';
 import '../../features/auth/login_page.dart';
-import '../../features/auth/onboarding_page.dart';
+import '../../features/onboarding/onboarding_page.dart';
 import '../../features/feed/feed_page.dart';
 import '../../features/discover/discover_page.dart';
 import '../../features/chat/chat_list_page.dart';
@@ -52,6 +52,10 @@ final _rootNavigatorKey = GlobalKey<NavigatorState>();
 /// 用于底部导航栏内的路由导航
 final shellNavigatorKey = GlobalKey<NavigatorState>();
 
+/// 引导完成状态 StateProvider
+/// 用于同步跟踪用户是否已完成引导流程
+final onboardingCompleteProvider = StateProvider<bool?>((ref) => null);
+
 /// 路由 Provider
 ///
 /// 使用 Riverpod 创建 GoRouter 实例，
@@ -59,6 +63,7 @@ final shellNavigatorKey = GlobalKey<NavigatorState>();
 final routerProvider = Provider<GoRouter>((ref) {
   // 监听登录状态派生 Provider，避免用户数据刷新时触发重定向
   final loggedIn = ref.watch(isLoggedInProvider);
+  final onboardingComplete = ref.watch(onboardingCompleteProvider);
 
   return GoRouter(
     navigatorKey: _rootNavigatorKey,
@@ -68,7 +73,7 @@ final routerProvider = Provider<GoRouter>((ref) {
     ///
     /// 实现登录状态路由守卫：
     /// - 未登录用户访问非登录/引导页面时重定向到登录页
-    /// - 已登录用户访问登录页时重定向到信息流页面
+    /// - 已登录用户访问登录页时重定向到信息流页面或引导页面
     redirect: (context, state) {
       final isLoginRoute = state.matchedLocation == '/login';
       final isOnboarding = state.matchedLocation == '/onboarding';
@@ -76,8 +81,22 @@ final routerProvider = Provider<GoRouter>((ref) {
       // 未登录且不在登录/引导页面，重定向到登录页
       if (!loggedIn && !isLoginRoute && !isOnboarding) return '/login';
 
-      // 已登录但在登录页面，重定向到信息流页面
-      if (loggedIn && isLoginRoute) return '/feed';
+      // 已登录但在登录页面
+      if (loggedIn && isLoginRoute) {
+        // 如果引导状态还未检查，先跳到 feed（之后会处理）
+        if (onboardingComplete == null) return '/feed';
+        // 需要引导则跳到引导页面
+        if (!onboardingComplete) return '/onboarding';
+        return '/feed';
+      }
+
+      // 已登录且引导未完成，强制跳转到引导页面（除了引导页面本身）
+      if (loggedIn &&
+          onboardingComplete == false &&
+          !isOnboarding &&
+          !isLoginRoute) {
+        return '/onboarding';
+      }
 
       // 其他情况不重定向
       return null;

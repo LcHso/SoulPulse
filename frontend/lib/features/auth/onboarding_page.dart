@@ -55,7 +55,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
                         Icon(page.icon,
-                            size: 80, color: const Color(0xFF0095F6)),
+                            size: 80,
+                            color: Theme.of(context).colorScheme.primary),
                         const SizedBox(height: 32),
                         Text(
                           page.title,
@@ -92,7 +93,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(4),
                     color: _currentPage == i
-                        ? const Color(0xFF0095F6)
+                        ? Theme.of(context).colorScheme.primary
                         : Colors.grey[400],
                   ),
                 );

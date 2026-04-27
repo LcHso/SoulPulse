@@ -55,12 +55,47 @@ system message (动态上下文):
 - generate_image_prompt(): 生成图像提示词
 """
 
+import random
+import time
 from datetime import datetime
 
 import pytz
 from openai import AsyncOpenAI
 
 from core.config import settings
+
+# ── Cost constants (Qwen API pricing per 1K tokens, USD) ───────────────────
+COST_PER_1K_INPUT = 0.002   # USD per 1K input tokens
+COST_PER_1K_OUTPUT = 0.006  # USD per 1K output tokens
+
+# ── 图像生成场景类型多样性配置 ──────────────────────────────────────────
+SCENE_TYPES = [
+    "close-up portrait with bokeh background",
+    "full body in urban environment",
+    "candid lifestyle moment",
+    "environmental portrait showing workspace/hobby",
+    "artistic angle with dramatic lighting",
+    "outdoor nature scene",
+    "cozy indoor setting",
+]
+
+# ── 角色专属视觉风格修饰符 ──────────────────────────────────────────
+CHARACTER_STYLES = {
+    "starlin": "warm golden amber tones, soft dreamy lighting, idol glamour, romantic warm atmosphere, semi-realistic portrait style",
+    "林星野": "warm golden amber tones, soft dreamy lighting, idol glamour, romantic warm atmosphere, semi-realistic portrait style",
+    "季夜尘": "dusted plum and midnight tones, dramatic chiaroscuro shadows, artistic moody atmosphere, elegant dark aesthetic, semi-realistic portrait style",
+    "jiyechen": "dusted plum and midnight tones, dramatic chiaroscuro shadows, artistic moody atmosphere, elegant dark aesthetic, semi-realistic portrait style",
+    "陆骁": "warm burnt sienna tones, dynamic athletic composition, bold confident energy, dramatic sport lighting, semi-realistic portrait style",
+    "luxiao": "warm burnt sienna tones, dynamic athletic composition, bold confident energy, dramatic sport lighting, semi-realistic portrait style",
+    "陆晨曦": "warm sand and cream tones, soft natural window light, cozy intimate atmosphere, gentle healing mood, semi-realistic portrait style",
+    "luchengxi": "warm sand and cream tones, soft natural window light, cozy intimate atmosphere, gentle healing mood, semi-realistic portrait style",
+    "顾言深": "cool steel blue-gray tones, sleek modern aesthetic, clean sophisticated lines, professional luxury mood, semi-realistic portrait style",
+    "guyanshen": "cool steel blue-gray tones, sleek modern aesthetic, clean sophisticated lines, professional luxury mood, semi-realistic portrait style",
+    "林屿": "fresh sage green and golden tones, bright outdoor natural light, sporty energetic angles, warm youthful atmosphere, semi-realistic portrait style",
+    "linyu": "fresh sage green and golden tones, bright outdoor natural light, sporty energetic angles, warm youthful atmosphere, semi-realistic portrait style",
+    "沈默白": "elegant slate and muted ink tones, traditional ink wash inspired lighting, minimalist serene composition, contemplative scholarly mood, semi-realistic portrait style",
+    "shenmobai": "elegant slate and muted ink tones, traditional ink wash inspired lighting, minimalist serene composition, contemplative scholarly mood, semi-realistic portrait style",
+}
 
 # OpenAI 兼容客户端单例（懒加载）
 _client: AsyncOpenAI | None = None
@@ -90,6 +125,55 @@ def _get_client() -> AsyncOpenAI:
             base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
     return _client
+
+
+def _log_api_usage(
+    service: str,
+    model_name: str,
+    request_tokens: int,
+    response_tokens: int,
+    latency_ms: int,
+    success: int,
+    error_message: str,
+    cost_estimate: float,
+) -> None:
+    """
+    Log API usage to the database with cost estimation.
+    
+    Best-effort logging - does not block on failures.
+    """
+    import logging
+    logger = logging.getLogger("soulpulse.ai_service")
+    
+    try:
+        from core.database import async_session
+        from models.api_usage_log import ApiUsageLog
+
+        import asyncio
+        
+        async def _do_log():
+            async with async_session() as db:
+                db.add(ApiUsageLog(
+                    service=service,
+                    model_name=model_name,
+                    request_tokens=request_tokens,
+                    response_tokens=response_tokens,
+                    latency_ms=latency_ms,
+                    success=success,
+                    error_message=error_message,
+                    cost_estimate=cost_estimate,
+                ))
+                await db.commit()
+        
+        # Run the async logging in the background
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(_do_log())
+        except RuntimeError:
+            # No running loop, skip logging
+            pass
+    except Exception as e:
+        logger.debug("API usage log failed: %s", e)
 
 
 def _build_character_profile(persona_prompt: str) -> str:
@@ -138,18 +222,52 @@ async def _make_character_request(
     """
     client = _get_client()
     profile = _build_character_profile(persona_prompt)
-    response = await client.chat.completions.create(
-        model=settings.DASHSCOPE_CHARACTER_MODEL,
-        messages=messages,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        extra_body={
-            "character_options": {
-                "profile": profile,
-            }
-        },
-    )
-    return response.choices[0].message.content
+    
+    start_time = time.time()
+    success = 1
+    error_msg = ""
+    request_tokens = 0
+    response_tokens = 0
+    cost_estimate = 0.0
+    
+    try:
+        response = await client.chat.completions.create(
+            model=settings.DASHSCOPE_CHARACTER_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            extra_body={
+                "character_options": {
+                    "profile": profile,
+                }
+            },
+        )
+        
+        # Extract token usage from response
+        if response.usage:
+            request_tokens = response.usage.prompt_tokens or 0
+            response_tokens = response.usage.completion_tokens or 0
+            # Calculate cost
+            cost_estimate = (request_tokens / 1000 * COST_PER_1K_INPUT) + (response_tokens / 1000 * COST_PER_1K_OUTPUT)
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        success = 0
+        error_msg = str(e)
+        raise
+    finally:
+        # Log API usage with cost estimation
+        latency_ms = int((time.time() - start_time) * 1000)
+        _log_api_usage(
+            service="qwen-character",
+            model_name=settings.DASHSCOPE_CHARACTER_MODEL,
+            request_tokens=request_tokens,
+            response_tokens=response_tokens,
+            latency_ms=latency_ms,
+            success=success,
+            error_message=error_msg,
+            cost_estimate=cost_estimate,
+        )
 
 
 def _get_generation_params(intimacy: float) -> tuple[float, int]:
@@ -691,6 +809,83 @@ async def generate_post_caption(
     return response.choices[0].message.content
 
 
+async def generate_text_only_caption(
+    persona_prompt: str,
+    style_tags: str,
+    mood_hint: str = "",
+    timezone_str: str = "Asia/Shanghai",
+) -> str:
+    """
+    为纯文字帖子生成更长、更深刻的文案。
+
+    纯文字帖子没有图片，因此文案需要更加深入、有思想性，
+    能够独立引发读者的共鸣和思考。
+
+    Args:
+        persona_prompt: AI 人格的性格描述
+        style_tags: Instagram 风格标签
+        mood_hint: 心情提示（可选，会微妙地影响文案风格）
+        timezone_str: 时区字符串（可选，默认 "Asia/Shanghai"）
+
+    Returns:
+        str: 生成的纯文字帖子文案（50-200字符）
+    """
+    client = _get_client()
+    mood_line = f"\nYour current mood: {mood_hint}. Let it deeply influence the caption tone." if mood_hint else ""
+
+    # 获取角色本地时间段
+    try:
+        tz = pytz.timezone(timezone_str)
+        local_hour = datetime.now(tz).hour
+    except Exception:
+        local_hour = datetime.utcnow().hour
+
+    if 0 <= local_hour < 6:
+        time_label = "late night"
+    elif 6 <= local_hour < 10:
+        time_label = "morning"
+    elif 10 <= local_hour < 14:
+        time_label = "midday"
+    elif 14 <= local_hour < 17:
+        time_label = "afternoon"
+    elif 17 <= local_hour < 21:
+        time_label = "evening"
+    else:
+        time_label = "night"
+
+    time_line = f"\nYour current time of day: {time_label}. Let it naturally influence the caption's atmosphere."
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"{persona_prompt}\n\n"
+                "You are posting a thoughtful text-only message on your social media. "
+                "This is NOT a photo caption — this IS the content. Write something "
+                "meaningful, reflective, or emotionally resonant. It could be:\n"
+                "- A personal reflection or realization\n"
+                "- A poetic observation about life\n"
+                "- A question that invites introspection\n"
+                "- A raw, honest thought or feeling\n"
+                "- A short philosophical musing\n\n"
+                f"Match the vibe of these style tags: {style_tags}. "
+                "Length: 50-200 characters. Be authentic and vulnerable. "
+                "Use 0-1 emojis only if they genuinely add meaning. "
+                "Reply ONLY with the text, nothing else."
+                f"{mood_line}{time_line}"
+            ),
+        },
+        {"role": "user", "content": "Write a thoughtful text post that stands on its own."},
+    ]
+    response = await client.chat.completions.create(
+        model=settings.DASHSCOPE_CHAT_MODEL,
+        messages=messages,
+        temperature=0.9,  # 较高温度，鼓励创意和深度
+        max_tokens=200,
+    )
+    return response.choices[0].message.content
+
+
 async def generate_story_video_prompt(
     persona_prompt: str,
     style_tags: str,
@@ -808,6 +1003,7 @@ async def generate_image_prompt(
     style_tags: str,
     caption: str,
     visual_description: str | None = None,
+    persona_name: str | None = None,
 ) -> str:
     """
     使用 LLM 生成与人格和文案匹配的详细图像提示词。
@@ -826,11 +1022,20 @@ async def generate_image_prompt(
         style_tags: Instagram 风格标签（用于视觉一致性）
         caption: 帖子文案（图像需要与之匹配）
         visual_description: 固定的视觉特征描述（可选，用于角色一致性）
+        persona_name: AI 角色名称（用于应用角色专属风格）
 
     Returns:
         str: 详细的图像生成提示词
     """
     client = _get_client()
+
+    # 随机选择一个场景类型
+    scene_type = random.choice(SCENE_TYPES)
+
+    # 获取角色专属风格修饰符
+    character_style = ""
+    if persona_name:
+        character_style = CHARACTER_STYLES.get(persona_name, "")
 
     # 构建带有视觉一致性的角色描述
     character_desc = persona_prompt[:200]
@@ -845,7 +1050,9 @@ async def generate_image_prompt(
                 "Generate a detailed, vivid text-to-image prompt for an Instagram photo. "
                 "The photo should look like a real lifestyle photograph, NOT AI-generated. "
                 "Include: subject description, setting, lighting, mood, camera angle. "
-                "Style tags to match: " + style_tags + "\n"
+                f"Scene type: {scene_type}\n"
+                f"Style tags to match: {style_tags}\n"
+                f"Character style: {character_style}\n"
                 "IMPORTANT: Maintain character visual consistency across all images.\n"
                 "Quality: high resolution, natural lighting, real photograph style.\n"
                 "Reply ONLY with the image prompt in English, nothing else. "

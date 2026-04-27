@@ -401,6 +401,7 @@ async def get_chat_history(
 
     使用游标分页，支持向前加载更早的消息。
     同时会标记所有未投递的消息为已投递。
+    如果是首次聊天（无历史消息），自动生成 AI 欢迎消息。
 
     Args:
         ai_id: AI 人格 ID
@@ -412,6 +413,38 @@ async def get_chat_history(
     Returns:
         HistoryResponse: 包含消息列表和是否有更多的标志
     """
+    # 检查是否是首次聊天（且不是分页加载）
+    is_first_chat = False
+    if before_id is None:
+        is_first_chat = await chat_service.check_is_first_chat(
+            db, current_user.id, ai_id
+        )
+
+    # 如果是首次聊天，生成欢迎消息
+    if is_first_chat:
+        # 获取 AI 人格信息
+        persona_result = await db.execute(
+            select(AIPersona).where(AIPersona.id == ai_id)
+        )
+        persona = persona_result.scalar_one_or_none()
+
+        if persona:
+            # 生成欢迎消息
+            welcome_content = await chat_service.generate_welcome_message(
+                db, current_user, persona
+            )
+            # 保存欢迎消息
+            welcome_msg = await chat_service.persist_message(
+                db=db,
+                user_id=current_user.id,
+                ai_id=ai_id,
+                role="assistant",
+                content=welcome_content,
+                message_type="chat",
+                delivered=1,  # 标记为已投递，因为用户正在查看
+            )
+            await db.commit()
+
     messages = await chat_service.get_history(
         db=db,
         user_id=current_user.id,
