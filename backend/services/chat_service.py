@@ -36,9 +36,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
+from datetime import datetime
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import settings
@@ -56,6 +58,8 @@ from services import (
     memory_service,
     milestone_service,
 )
+from services.vision_service import vision_service
+from services.voice_service import voice_service
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +108,8 @@ class ChatResult:
     intimacy: float                     # 更新后的亲密度分数
     nickname_proposal: dict | None = field(default=None)   # 昵称提案（可选）
     emotion_hint: dict | None = field(default=None)        # 情绪提示（可选）
+    voice_url: str | None = field(default=None)            # AI 语音回复 URL（可选）
+    image_url: str | None = field(default=None)            # AI 发送的图片 URL（可选）
 
 
 # ── 消息持久化 ─────────────────────────────────────────
@@ -118,6 +124,10 @@ async def persist_message(
     event: str | None = None,
     post_context: str | None = None,
     delivered: int = 1,
+    media_type: str | None = None,
+    media_url: str | None = None,
+    media_metadata: dict | None = None,
+    voice_url: str | None = None,
 ) -> ChatMessage:
     """
     持久化单条聊天消息并返回带有 ID 的消息对象。
@@ -132,6 +142,10 @@ async def persist_message(
         event: 事件类型（可选）
         post_context: 帖子上下文（可选，用于帖子相关聊天）
         delivered: 是否已投递（默认 1，主动私信为 0）
+        media_type: 媒体类型（"image"/"voice"/"video"）
+        media_url: 用户上传或 AI 发送的媒体 URL
+        media_metadata: 媒体元数据（转录/时长/尺寸等）
+        voice_url: AI 生成的语音回复 URL
 
     Returns:
         ChatMessage: 带有数据库分配 ID 的消息对象
@@ -145,6 +159,10 @@ async def persist_message(
         event=event,
         post_context=post_context,
         delivered=delivered,
+        media_type=media_type,
+        media_url=media_url,
+        media_metadata_json=media_metadata,
+        voice_url=voice_url,
     )
     db.add(msg)
     await db.flush()  # 分配 ID 但不提交事务，允许后续操作在同一事务中完成
@@ -513,12 +531,168 @@ async def maybe_generate_summary(user_id: int, ai_id: int) -> None:
 
 # ── 主聊天编排函数 ─────────────────────────────────────
 
+# ── 世界观上下文注入（Worldbuilding Context）──────────────────────────────
+
+async def _get_world_context(persona_id: int, db: AsyncSession) -> str:
+    """
+    获取当前世界事件与角色剧情弧阶段，用于拼接进系统提示。
+
+    两部分：
+    1. 所有潮所包含当前 persona 且仍在生效期的 WorldEvent
+    2. persona 当前激活的 CharacterArc 阶段
+    """
+    from models.world_event import WorldEvent
+    from models.character_arc import CharacterArc
+
+    context_parts: list[str] = []
+
+    now = datetime.utcnow()
+    try:
+        events_res = await db.execute(
+            select(WorldEvent).where(
+                WorldEvent.is_active == True,  # noqa: E712
+                WorldEvent.start_date <= now,
+                or_(WorldEvent.end_date >= now, WorldEvent.end_date.is_(None)),
+            )
+        )
+        for event in events_res.scalars().all():
+            if persona_id in (event.affected_persona_ids or []):
+                directive = event.content_directive or event.description or ""
+                context_parts.append(f"[当前事件] {event.title}: {directive}")
+    except Exception:
+        logger.warning("World event lookup failed", exc_info=True)
+
+    try:
+        arc_res = await db.execute(
+            select(CharacterArc).where(
+                CharacterArc.persona_id == persona_id,
+                CharacterArc.is_active == True,  # noqa: E712
+            )
+        )
+        arc = arc_res.scalar_one_or_none()
+        if arc and arc.phase_config_json:
+            phases = arc.phase_config_json
+            if 0 <= arc.current_phase < len(phases):
+                phase = phases[arc.current_phase] or {}
+                phase_name = phase.get("name", "")
+                phase_overlay = phase.get("prompt_overlay", "")
+                context_parts.append(
+                    f"[当前剧情阶段] {arc.arc_name} - {phase_name}: {phase_overlay}"
+                )
+    except Exception:
+        logger.warning("Character arc lookup failed", exc_info=True)
+
+    return "\n".join(context_parts)
+
+
+async def _check_subscription_benefits(user_id: int, db: AsyncSession) -> dict:
+    """Check user's subscription benefits for content gating.
+
+    Returned dict is consumed by downstream services (image gen quality,
+    scene access, priority DM scheduling, etc.) and surfaced in chat
+    responses where useful.
+    """
+    from services.subscription_service import SubscriptionService
+
+    svc = SubscriptionService()
+    try:
+        tier = await svc.get_user_tier(db, user_id)
+        return {
+            "tier": tier,
+            "hd_images": await svc.check_benefit(db, user_id, "hd_images"),
+            "exclusive_scenes": await svc.check_benefit(db, user_id, "exclusive_scenes"),
+            "priority_dm": await svc.check_benefit(db, user_id, "priority_dm"),
+            "unlimited_replay": await svc.check_benefit(db, user_id, "unlimited_replay"),
+        }
+    except Exception:
+        logger.warning("Subscription benefit lookup failed", exc_info=True)
+        return {
+            "tier": "free",
+            "hd_images": False,
+            "exclusive_scenes": False,
+            "priority_dm": False,
+            "unlimited_replay": False,
+        }
+
+
+async def _get_persona_reference(
+    persona_id: int, message: str, db: AsyncSession,
+) -> str:
+    """
+    当用户消息中提及其他 AI 角色名字时，返回关系上下文。
+
+    处理流程：
+    1. 查出除当前 persona 外的所有活跃 persona。
+    2. 在消息中检测是否包含其他 persona 的名字。
+    3. 从 persona_relationships 表中加载关系记录。
+    """
+    from models.persona_relationship import PersonaRelationship
+
+    if not message:
+        return ""
+
+    try:
+        all_personas_res = await db.execute(
+            select(AIPersona.id, AIPersona.name).where(
+                AIPersona.id != persona_id,
+                AIPersona.is_active == 1,
+            )
+        )
+        rows = list(all_personas_res.all())
+    except Exception:
+        logger.warning("Persona lookup for reference detection failed", exc_info=True)
+        return ""
+
+    mentioned: list[tuple[int, str]] = []
+    for row in rows:
+        other_id = row[0]
+        other_name = row[1] or ""
+        if other_name and other_name in message:
+            mentioned.append((other_id, other_name))
+
+    if not mentioned:
+        return ""
+
+    parts: list[str] = []
+    for other_id, other_name in mentioned:
+        try:
+            rel_res = await db.execute(
+                select(PersonaRelationship).where(
+                    PersonaRelationship.persona_a_id == persona_id,
+                    PersonaRelationship.persona_b_id == other_id,
+                ).limit(1)
+            )
+            rel = rel_res.scalar_one_or_none()
+        except Exception:
+            rel = None
+            logger.warning("PersonaRelationship lookup failed", exc_info=True)
+
+        if not rel:
+            continue
+
+        desc_bits = []
+        if rel.relationship_type:
+            desc_bits.append(rel.relationship_type)
+        if rel.description:
+            desc_bits.append(rel.description)
+        if rel.public_context:
+            desc_bits.append(rel.public_context)
+        rel_text = " | ".join(desc_bits)
+        parts.append(f"[关于{other_name}] {rel_text}")
+
+    return "\n".join(parts)
+
+
 async def handle_user_message(
     db: AsyncSession,
     user: User,
     ai_id: int,
     message: str,
     post_context: str | None = None,
+    media_type: str | None = None,
+    media_url: str | None = None,
+    media_metadata: dict | None = None,
+    generate_voice_reply: bool = False,
 ) -> ChatResult:
     """
     处理用户聊天消息的完整流程（端到端编排）。
@@ -597,6 +771,9 @@ async def handle_user_message(
     user_msg = await persist_message(
         db, user.id, ai_id, "user", message,
         post_context=post_context,
+        media_type=media_type,
+        media_url=media_url,
+        media_metadata=media_metadata,
     )
 
     # ── 步骤 7: 计算消息嵌入向量（用于记忆和锚点检索）────────
@@ -640,10 +817,40 @@ async def handle_user_message(
     emotion_directive = emotion_engine.build_emotion_directive(emotion_state)
     emotion_overrides = emotion_engine.get_param_overrides(emotion_state)
 
-    # ── 步骤 11: 调用 AI 生成回复 ─────────────────────────────────────────────
+    # ── 订阅足迹：供下游服务使用（HD图像/专享场景/优先DM）
+    subscription_benefits = await _check_subscription_benefits(user.id, db)
+
+    # ── 步骤 10b: 拼接世界观上下文与角色反向引用
+    persona_prompt_with_world = persona.personality_prompt
+    try:
+        world_context = await _get_world_context(ai_id, db)
+    except Exception:
+        world_context = ""
+        logger.warning("_get_world_context failed", exc_info=True)
+    try:
+        persona_reference = await _get_persona_reference(ai_id, message, db)
+    except Exception:
+        persona_reference = ""
+        logger.warning("_get_persona_reference failed", exc_info=True)
+    if world_context:
+        persona_prompt_with_world = (
+            f"{persona_prompt_with_world}\n\n[世界背景信息]\n{world_context}"
+        )
+    if persona_reference:
+        persona_prompt_with_world = (
+            f"{persona_prompt_with_world}\n\n[角色关系参考]\n{persona_reference}"
+        )
+    if subscription_benefits.get("tier") not in (None, "free", ""):
+        persona_prompt_with_world = (
+            f"{persona_prompt_with_world}\n\n[订阅者提示] 用户是 "
+            f"{subscription_benefits['tier'].upper()} 会员，可以适当在对话中"
+            "表达额外亲近、心领神会。"
+        )
+
+    # ── 步骤 11: 调用 AI 生成回复
     try:
         reply = await chat_with_ai(
-            persona_prompt=persona.personality_prompt,
+            persona_prompt=persona_prompt_with_world,
             intimacy=interaction.intimacy_score,
             user_message=user_message,
             chat_history=chat_history,
@@ -663,7 +870,22 @@ async def handle_user_message(
         )
 
     # ── 步骤 12: 持久化 AI 回复 ────────────────────────────────────
-    ai_msg = await persist_message(db, user.id, ai_id, "assistant", reply)
+    ai_voice_url: str | None = None
+    if generate_voice_reply and persona.voice_config_json:
+        try:
+            ai_voice_url = await voice_service.generate_voice(
+                text=reply,
+                voice_config=persona.voice_config_json,
+                persona_id=persona.id,
+            )
+        except Exception:
+            logger.warning("AI voice generation failed", exc_info=True)
+            ai_voice_url = None
+
+    ai_msg = await persist_message(
+        db, user.id, ai_id, "assistant", reply,
+        voice_url=ai_voice_url,
+    )
 
     # ── 步骤 13: 更新亲密度分数 ─────────────────────────────────────
     old_intimacy = interaction.intimacy_score
@@ -743,4 +965,127 @@ async def handle_user_message(
         intimacy=new_intimacy,
         nickname_proposal=nickname_proposal,
         emotion_hint=e_hint,
+        voice_url=ai_voice_url,
+    )
+
+
+# ── 多模态消息路由 ────────────────────────────────
+
+async def handle_media_message(
+    db: AsyncSession,
+    user: User,
+    ai_id: int,
+    media_type: str,
+    media_url: str,
+    caption: str = "",
+    generate_voice_reply: bool = False,
+) -> ChatResult:
+    """
+    处理用户发送的媒体消息（图片/语音/视频），路由到相应的多模态服务。
+
+    路由逻辑：
+    - "image": 调用 vision_service.analyze_image() 生成角色化反应。
+    - "voice": 调用 voice_service.transcribe_audio() 转录后走普通聊天流程。
+    - "video": 使用首帧调用 vision_service（简化实现）。
+
+    生成的“虚拟用户文本”会送入 handle_user_message，同时携带媒体字段以便
+    消息在聊天记录中能渲染为原始媒体。
+
+    Args:
+        db: 异步数据库会话
+        user: 当前用户
+        ai_id: AI 人格 ID
+        media_type: 媒体类型（"image" / "voice" / "video"）
+        media_url: 媒体文件 URL（相对路径或绝对 URL）
+        caption: 用户随媒体附带的文本（可选）
+        generate_voice_reply: 是否同时生成 AI 语音回复
+
+    Returns:
+        ChatResult: 聊天处理结果
+    """
+    # 先加载 persona（用于 vision/voice 服务需要 persona_prompt）
+    persona_result = await db.execute(
+        select(AIPersona).where(AIPersona.id == ai_id)
+    )
+    persona = persona_result.scalar_one_or_none()
+    if not persona:
+        raise ValueError(f"AI persona {ai_id} not found")
+
+    media_metadata: dict = {"original_url": media_url}
+    surrogate_text = caption.strip()
+
+    if media_type == "image":
+        # 获取近期上下文供反应生成使用
+        try:
+            recent = await get_history(db, user.id, ai_id, limit=4)
+            ctx = "\n".join(f"{m.role}: {m.content[:80]}" for m in recent)
+        except Exception:
+            ctx = ""
+
+        try:
+            description = await vision_service.describe_image_for_context(media_url)
+        except Exception:
+            description = "用户发送的一张图片"
+        media_metadata["description"] = description
+
+        # 生成传递给 LLM 的“虚拟用户文本”
+        if surrogate_text:
+            llm_message = (
+                f"[The user just sent you an image. Image description: "
+                f"{description}] {surrogate_text}"
+            )
+        else:
+            llm_message = (
+                f"[The user just sent you an image. Image description: {description}] "
+                "React in-character to what you see."
+            )
+
+    elif media_type == "voice":
+        try:
+            asr_result = await voice_service.transcribe_audio(media_url)
+        except Exception:
+            asr_result = {"text": "", "duration": 0.0, "language": "zh"}
+        transcription = (asr_result.get("text") or "").strip()
+        media_metadata["transcription"] = transcription
+        media_metadata["duration"] = asr_result.get("duration", 0.0)
+        media_metadata["language"] = asr_result.get("language", "zh")
+
+        if not transcription:
+            llm_message = "[The user sent a voice message but it could not be transcribed.]"
+        else:
+            llm_message = transcription
+
+    elif media_type == "video":
+        # 简化处理：直接将视频首帧交给视觉服务描述
+        # 如果需要折取关键帧，可在上游生成 thumb_url 后传入 caption
+        thumb_url = media_url
+        try:
+            description = await vision_service.describe_image_for_context(thumb_url)
+        except Exception:
+            description = "用户发送的一段视频"
+        media_metadata["description"] = description
+        media_metadata["keyframe_url"] = thumb_url
+        if surrogate_text:
+            llm_message = (
+                f"[The user sent a short video. First-frame description: "
+                f"{description}] {surrogate_text}"
+            )
+        else:
+            llm_message = (
+                f"[The user sent a short video. First-frame description: {description}] "
+                "React in-character to what you see."
+            )
+    else:
+        raise ValueError(f"Unsupported media_type: {media_type}")
+
+    # 复用主聊天编排，并传入媒体字段以持久化到 chat_messages
+    return await handle_user_message(
+        db=db,
+        user=user,
+        ai_id=ai_id,
+        message=llm_message,
+        media_type=media_type,
+        media_url=media_url,
+        media_metadata=media_metadata,
+        generate_voice_reply=generate_voice_reply,
     )

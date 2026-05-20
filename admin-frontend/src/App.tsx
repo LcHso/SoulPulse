@@ -12,6 +12,12 @@ import MemoryPage from './pages/memory/MemoryPage';
 import UsersPage from './pages/users/UsersPage';
 import CommercePage from './pages/commerce/CommercePage';
 import DevopsPage from './pages/devops/DevopsPage';
+import ScenesPage from './pages/scenes/ScenesPage';
+import OutfitsPage from './pages/outfits/OutfitsPage';
+import LaunchesPage from './pages/launches/LaunchesPage';
+import AssetsPage from './pages/assets/AssetsPage';
+import SubscriptionsPage from './pages/subscriptions/SubscriptionsPage';
+import WorldEventsPage from './pages/world-events/WorldEventsPage';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const isLoggedIn = useAuthStore((s) => s.isLoggedIn);
@@ -41,6 +47,12 @@ const App: React.FC = () => (
             <Route path="users" element={<UsersPage />} />
             <Route path="commerce" element={<CommercePage />} />
             <Route path="devops" element={<DevopsPage />} />
+            <Route path="scenes" element={<ScenesPage />} />
+            <Route path="outfits" element={<OutfitsPage />} />
+            <Route path="launches" element={<LaunchesPage />} />
+            <Route path="assets" element={<AssetsPage />} />
+            <Route path="subscriptions" element={<SubscriptionsPage />} />
+            <Route path="world-events" element={<WorldEventsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/admin" replace />} />
         </Routes>

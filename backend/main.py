@@ -51,6 +51,7 @@ from api.endpoints.notifications import router as notifications_router
 from api.endpoints.admin import router as admin_router
 from api.endpoints.interactions import router as interactions_router
 from api.endpoints.fcm import router as fcm_router
+from api.endpoints.subscription import router as subscription_router
 from api.admin import admin_router as admin_v2_router
 
 # ── 结构化日志配置 ──────────────────────────────────────────
@@ -118,6 +119,7 @@ app.include_router(ai_profile_router)     # AI 角色档案：角色信息、动
 app.include_router(notifications_router)  # 通知：系统通知、互动提醒
 app.include_router(interactions_router)   # 互动关系：亲密度、关系摘要
 app.include_router(fcm_router)             # FCM：设备推送 Token 管理
+app.include_router(subscription_router)   # 订阅与活动营销 (Plan Task 4)
 app.include_router(admin_router)          # 管理后台：内容审核、数据分析（旧版兼容）
 app.include_router(admin_v2_router)       # SDC 管理后台 v2：完整 7 模块
 

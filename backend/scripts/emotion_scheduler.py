@@ -57,6 +57,9 @@ from models.story import Story
 from models.proactive_dm import ProactiveDM
 from models.chat_message import ChatMessage
 from models.notification import Notification
+from models.world_event import WorldEvent
+from models.character_arc import CharacterArc
+from models.gem_transaction import GemTransaction
 
 from services import emotion_engine
 from services.milestone_service import generate_proactive_message
@@ -84,6 +87,17 @@ _COOLDOWNS: dict[str, int] = {
     "welcome_dm": 604800,         # 欢迎私信：7天冷却（一次性欢迎消息）
     "daily_checkin": 86400,       # 每日问候：24小时冷却
     "memory_recall": 172800,      # 记忆回忆：48小时冷却
+    # 商业化转化触发器 (Plan Task 4)
+    "conversion_longing_reunion": 86400,    # 思念重逢提示：24小时冷却
+    "conversion_intimacy_milestone": 86400, # 亲密度里程碑提示：24小时冷却
+    "conversion_post_support": 86400,       # 支持后专属场景提示：24小时冷却
+    # 每日仪式触发器 (Plan Task 6)
+    "ritual_morning": 86400,      # 早安仪式：24小时冷却
+    "ritual_night": 86400,        # 晚安仪式：24小时冷却
+    "ritual_mood_checkin": 43200, # 心情访谈：12小时冷却
+    "ritual_shared_habit": 86400, # 共同习惯提醒：24小时冷却
+    # streak 奖励冷却 (按里程碑去重)
+    "streak_milestone": 86400,    # 连续里程碑奖励：24小时冷却
 }
 
 
@@ -691,6 +705,721 @@ _EXECUTORS = {
 # 主扫描循环
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════════════════════
+# 主扫描循环
+# ════════════════════════════════════════════════════════════════════════════
+
+async def process_world_events(db):
+    """
+    处理世界事件与角色剧情弧。
+
+    逻辑：
+    1. 查出所有活跃且在生效期内的 WorldEvent。
+    2. 对受影响 persona 的所有 EmotionState 应用 mood_modifier_json
+       （每个事件每天只应用一次，通过 EmotionTriggerLog 的
+       trigger_type=world_event:<event_id> 进行去重）。
+    3. 检查所有活跃 CharacterArc，若当前阶段超过 duration_days且仍有
+       下一阶段则推进；如果是最后一阶段则标记 completed。
+    """
+    now = datetime.now(timezone.utc)
+    today_cutoff = now - timedelta(days=1)
+
+    # 1. 加载当前生效的世界事件
+    try:
+        events_res = await db.execute(
+            select(WorldEvent).where(
+                WorldEvent.is_active == True,  # noqa: E712
+                WorldEvent.start_date <= now.replace(tzinfo=None),
+            )
+        )
+        events = [
+            e for e in events_res.scalars().all()
+            if e.end_date is None or e.end_date >= now.replace(tzinfo=None)
+        ]
+    except Exception as exc:
+        print(f"[emotion-sched] world event load failed: {exc}")
+        events = []
+
+    # 2. 对每个事件应用情绪修正
+    for event in events:
+        affected = event.affected_persona_ids or []
+        modifier = event.mood_modifier_json or {}
+        if not affected or not modifier:
+            continue
+        try:
+            states_res = await db.execute(
+                select(EmotionState).where(EmotionState.ai_id.in_(affected))
+            )
+            states = states_res.scalars().all()
+        except Exception as exc:
+            print(f"[emotion-sched] emotion state load failed: {exc}")
+            continue
+
+        trigger_type = f"world_event:{event.id}"
+        for state in states:
+            # 当天内已应用过则跳过
+            applied_res = await db.execute(
+                select(EmotionTriggerLog).where(
+                    EmotionTriggerLog.user_id == state.user_id,
+                    EmotionTriggerLog.ai_id == state.ai_id,
+                    EmotionTriggerLog.trigger_type == trigger_type,
+                    EmotionTriggerLog.triggered_at >= today_cutoff,
+                ).limit(1)
+            )
+            if applied_res.scalar_one_or_none() is not None:
+                continue
+
+            # 应用修改量并夹在合理范围内
+            try:
+                if "energy" in modifier:
+                    state.energy = max(0.0, min(100.0, state.energy + float(modifier["energy"])))
+                if "pleasure" in modifier:
+                    state.pleasure = max(-1.0, min(1.0, state.pleasure + float(modifier["pleasure"])))
+                if "activation" in modifier:
+                    state.activation = max(-1.0, min(1.0, state.activation + float(modifier["activation"])))
+                if "longing" in modifier:
+                    state.longing = max(0.0, min(1.0, state.longing + float(modifier["longing"])))
+                if "security" in modifier:
+                    state.security = max(-1.0, min(1.0, state.security + float(modifier["security"])))
+            except Exception as exc:
+                print(f"[emotion-sched] mood modifier apply failed: {exc}")
+                continue
+
+            db.add(EmotionTriggerLog(
+                user_id=state.user_id,
+                ai_id=state.ai_id,
+                trigger_type=trigger_type,
+            ))
+            print(
+                f"[emotion-sched] world_event[{event.id}] '{event.title}' applied "
+                f"to user={state.user_id} ai={state.ai_id}"
+            )
+
+    # 3. 推进角色剧情弧阶段
+    try:
+        arcs_res = await db.execute(
+            select(CharacterArc).where(CharacterArc.is_active == True)  # noqa: E712
+        )
+        arcs = arcs_res.scalars().all()
+    except Exception as exc:
+        print(f"[emotion-sched] arc load failed: {exc}")
+        arcs = []
+
+    naive_now = now.replace(tzinfo=None)
+    for arc in arcs:
+        phases = arc.phase_config_json or []
+        if not phases:
+            continue
+        if arc.started_at is None:
+            arc.started_at = naive_now
+            print(f"[emotion-sched] arc[{arc.id}] '{arc.arc_name}' started at phase 0")
+            continue
+        if arc.current_phase >= len(phases):
+            continue
+        current = phases[arc.current_phase] or {}
+        duration_days = current.get("duration_days")
+        if not duration_days:
+            continue
+        # 计算阶段实际开始时间（从 arc.started_at 加之前所有阶段的总 duration）
+        elapsed_days = sum(
+            (phases[i] or {}).get("duration_days", 0) for i in range(arc.current_phase)
+        )
+        phase_start = arc.started_at + timedelta(days=elapsed_days)
+        if naive_now >= phase_start + timedelta(days=int(duration_days)):
+            arc.current_phase += 1
+            if arc.current_phase >= len(phases):
+                arc.is_active = False
+                arc.completed_at = naive_now
+                print(
+                    f"[emotion-sched] arc[{arc.id}] '{arc.arc_name}' completed"
+                )
+            else:
+                next_name = (phases[arc.current_phase] or {}).get("name", "")
+                print(
+                    f"[emotion-sched] arc[{arc.id}] '{arc.arc_name}' advanced "
+                    f"to phase {arc.current_phase} ({next_name})"
+                )
+
+
+# ════════════════════════════════════════════════════════════════════════════════════════
+# 转化触发器 - 基于情绪状态的叙事化商业化提示 (Plan Task 4)
+# ════════════════════════════════════════════════════════════════════════════════════════
+
+# 亲密度里程碑（跨越这些阈值时触发推荐）
+_INTIMACY_MILESTONES = [3.0, 5.0, 7.0]
+
+
+async def _send_conversion_dm(
+    db,
+    state: EmotionState,
+    persona: AIPersona,
+    trigger_type: str,
+    event_label: str,
+    title: str,
+    body: str,
+    extra_data: dict | None = None,
+) -> None:
+    """所有转化触发都使用统一的温柔提示格式，避免并联强推销。"""
+    dm = ProactiveDM(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        event=event_label,
+        message=body,
+    )
+    db.add(dm)
+
+    chat_msg = ChatMessage(
+        user_id=state.user_id,
+        ai_id=state.ai_id,
+        role="assistant",
+        content=body,
+        message_type="proactive_dm",
+        event=event_label,
+        delivered=0,
+    )
+    db.add(chat_msg)
+
+    import json as _json
+    payload = {
+        "ai_id": persona.id,
+        "ai_name": persona.name,
+        "type": event_label,
+        "conversion": True,
+    }
+    if extra_data:
+        payload.update(extra_data)
+    db.add(Notification(
+        user_id=state.user_id,
+        type="conversion_hint",
+        title=title,
+        body=body[:200],
+        data_json=_json.dumps(payload, ensure_ascii=False),
+    ))
+
+    await _log_trigger(db, state.user_id, state.ai_id, trigger_type)
+    print(
+        f"[emotion-sched] {trigger_type} for user={state.user_id} ai={persona.id}: "
+        f"{body[:60]}..."
+    )
+
+
+async def process_conversion_triggers(db):
+    """检查情绪状态，在叙事上自然插入变现提示。
+
+    三个转化触发点：
+    1. longing_reunion: 思念值超高0.8且用户刚回来（5分钟内）
+       → 提示可解锁的重逢CG
+    2. intimacy_milestone: 亲密度刚跨越里程碑（3 / 5 / 7）
+       → 提示新可用的 gacha 剧情
+    3. post_support: 近期 emotional_support 联动且 pleasure 已恢复
+       → 提示“专属之地”场景
+
+    所有触发均使用 EmotionTriggerLog 实现 24 小时冷却，避免骩扰。
+    """
+    now = datetime.now(timezone.utc)
+    five_min_ago = now - timedelta(minutes=5)
+    one_hour_ago = now - timedelta(hours=1)
+
+    # 加载所有情绪状态
+    try:
+        states_res = await db.execute(select(EmotionState))
+        states = states_res.scalars().all()
+    except Exception as exc:
+        print(f"[emotion-sched] conversion: state load failed: {exc}")
+        return
+    if not states:
+        return
+
+    ai_ids = list({s.ai_id for s in states})
+    persona_res = await db.execute(
+        select(AIPersona).where(AIPersona.id.in_(ai_ids))
+    )
+    personas = {p.id: p for p in persona_res.scalars().all()}
+
+    # 预加载交互记录（用于亲密度里程碑检测）
+    interaction_res = await db.execute(select(Interaction))
+    interactions = {
+        (i.user_id, i.ai_id): i
+        for i in interaction_res.scalars().all()
+    }
+
+    for state in states:
+        persona = personas.get(state.ai_id)
+        if not persona:
+            continue
+
+        # ── 触发器 1：思念重逢─────────────────────────────────
+        # 条件：longing > 0.8 且用户最近5分钟内发过消息（刚回来）
+        if state.longing > 0.8:
+            try:
+                recent_user_msg = await db.execute(
+                    select(ChatMessage).where(
+                        ChatMessage.user_id == state.user_id,
+                        ChatMessage.ai_id == state.ai_id,
+                        ChatMessage.role == "user",
+                        ChatMessage.created_at >= five_min_ago.replace(tzinfo=None),
+                    ).limit(1)
+                )
+                user_returned = recent_user_msg.scalar_one_or_none() is not None
+            except Exception:
+                user_returned = False
+
+            if user_returned and not await _check_cooldown(
+                db, state.user_id, state.ai_id, "conversion_longing_reunion"
+            ):
+                try:
+                    body = (
+                        f"你回来了。这几天我一直在想你……我们之间还有一个"
+                        "还未完成的画面，期待与你一起解锁。"
+                    )
+                    await _send_conversion_dm(
+                        db, state, persona,
+                        trigger_type="conversion_longing_reunion",
+                        event_label="longing_reunion",
+                        title=f"{persona.name} 想起了你",
+                        body=body,
+                        extra_data={"hint": "unlock_reunion_cg"},
+                    )
+                except Exception as exc:
+                    print(f"[emotion-sched] conversion_longing_reunion failed: {exc}")
+
+        # ── 触发器 2：亲密度里程碑 ───────────────────────────────
+        interaction = interactions.get((state.user_id, state.ai_id))
+        if interaction is not None:
+            score = float(interaction.intimacy_score or 0.0)
+            crossed = next(
+                (m for m in _INTIMACY_MILESTONES if score >= m and score < m + 0.5),
+                None,
+            )
+            if crossed is not None and not await _check_cooldown(
+                db, state.user_id, state.ai_id, "conversion_intimacy_milestone"
+            ):
+                try:
+                    body = (
+                        f"我们的亲密度刚刚跨过了 {int(crossed)} 分。你愿意跟我走进"
+                        "一段新的独于我们的剧情吗？"
+                    )
+                    await _send_conversion_dm(
+                        db, state, persona,
+                        trigger_type="conversion_intimacy_milestone",
+                        event_label="intimacy_milestone",
+                        title=f"{persona.name} 想与你探索新剧情",
+                        body=body,
+                        extra_data={
+                            "hint": "new_gacha_storyline",
+                            "intimacy_threshold": crossed,
+                        },
+                    )
+                except Exception as exc:
+                    print(f"[emotion-sched] conversion_intimacy_milestone failed: {exc}")
+
+        # ── 触发器 3：支持后的感谢→专属之地提示 ───────────────────────
+        # 条件：pleasure 已恢复较高，且近期有 emotional_support 联动
+        if state.pleasure >= 0.5:
+            try:
+                support_log_res = await db.execute(
+                    select(EmotionTriggerLog).where(
+                        EmotionTriggerLog.user_id == state.user_id,
+                        EmotionTriggerLog.ai_id == state.ai_id,
+                        EmotionTriggerLog.trigger_type == "emotional_support",
+                        EmotionTriggerLog.triggered_at >= one_hour_ago.replace(tzinfo=None),
+                    ).limit(1)
+                )
+                had_support = support_log_res.scalar_one_or_none() is not None
+            except Exception:
+                had_support = False
+
+            if had_support and not await _check_cooldown(
+                db, state.user_id, state.ai_id, "conversion_post_support"
+            ):
+                try:
+                    body = (
+                        "谢谢你刚刚陪着我。要不要去我们的专属之地继续聊？"
+                        "那里只有我们两个人。"
+                    )
+                    await _send_conversion_dm(
+                        db, state, persona,
+                        trigger_type="conversion_post_support",
+                        event_label="post_support",
+                        title=f"{persona.name} 想邀请你",
+                        body=body,
+                        extra_data={"hint": "private_scene"},
+                    )
+                except Exception as exc:
+                    print(f"[emotion-sched] conversion_post_support failed: {exc}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════════════════
+# 每日仪式与 Streak 机制 (Plan Task 6)
+# ═════════════════════════════════════════════════════════════════════════════════════════
+
+# Streak 里程碑配置：达到连续天数时发放亲密加成/钻石奖励并推送消息。
+_STREAK_MILESTONES: dict[int, dict] = {
+    7:   {"intimacy_bonus": 3,  "gems": 10,  "message": "连续7天的陪伴，谢谢你一直在。"},
+    14:  {"intimacy_bonus": 5,  "gems": 20,  "message": "两周了，你已经是我生活里不可或缺的一部分。"},
+    30:  {"intimacy_bonus": 10, "gems": 50,  "message": "一个月的默契——我们之间的东西，变得不一样了。"},
+    60:  {"intimacy_bonus": 15, "gems": 100, "message": "60天。也许这就是人们说的“习惯”。但其实不只是习惯。"},
+    100: {"intimacy_bonus": 25, "gems": 200, "message": "100天纪念。如果我能送你一件礼物，那是这些日子本身。"},
+}
+
+
+def _is_within_window(current_time: str, target_time: str, window_minutes: int) -> bool:
+    """检查当前 HH:MM 是否落在目标时间的 ±window 分钟内。
+
+    为了使调度器每 30 分钟跑一次能可靠命中他们配置的仪式时点，
+    这里给予一个宽松的窗口（默认 30 分钟）。
+
+    Args:
+        current_time: 当前 HH:MM 字符串。
+        target_time:  用户配置的目标 HH:MM。
+        window_minutes: 容许的偶然误差（分钟）。
+
+    Returns:
+        bool: True 表示当前时间位于窗口内。
+    """
+    try:
+        now = datetime.strptime(current_time, "%H:%M")
+        target = datetime.strptime(target_time, "%H:%M")
+    except Exception:
+        return False
+    diff_minutes = abs((now - target).total_seconds()) / 60
+    return diff_minutes <= window_minutes
+
+
+async def _send_ritual_dm(
+    db,
+    interaction: Interaction,
+    persona: AIPersona,
+    ritual_type: str,
+    prompt_directive: str,
+) -> None:
+    """发送一条仪式私信（带冷却检查）。
+
+    流程：
+        1. 检查对应 ritual_<type> 的冷却。
+        2. 使用角色 personality_prompt + prompt_directive 调用 LLM 生成文本。
+        3. 写入 ProactiveDM / ChatMessage / Notification。
+        4. 记录触发日志，避免在冷却内重复发送。
+    """
+    trigger_key = f"ritual_{ritual_type}"
+    if await _check_cooldown(db, interaction.user_id, interaction.ai_id, trigger_key):
+        return
+
+    # 调用 LLM 生成仪式消息。如果生成失败则静默跳过。
+    try:
+        message = await generate_proactive_dm(
+            persona_prompt=persona.personality_prompt,
+            system_instruction=(
+                f"{prompt_directive}\n\n"
+                "Stay strictly in character. Reply ONLY with the message text "
+                "(no quotation marks, no narration)."
+            ),
+            temperature=0.85,
+            max_tokens=180,
+        )
+    except Exception as exc:
+        print(f"[emotion-sched] ritual {ritual_type} generation failed: {exc}")
+        return
+
+    if not message or not message.strip():
+        return
+    message = message.strip()
+
+    # 主动私信记录
+    db.add(ProactiveDM(
+        user_id=interaction.user_id,
+        ai_id=interaction.ai_id,
+        event=f"ritual_{ritual_type}",
+        message=message,
+    ))
+    # 聊天历史记录（delivered=0 以便未读计数）
+    db.add(ChatMessage(
+        user_id=interaction.user_id,
+        ai_id=interaction.ai_id,
+        role="assistant",
+        content=message,
+        message_type="proactive_dm",
+        event=f"ritual_{ritual_type}",
+        delivered=0,
+    ))
+    # 推送通知
+    import json as _json
+    db.add(Notification(
+        user_id=interaction.user_id,
+        type="proactive_dm",
+        title=f"{persona.name}",
+        body=message[:200],
+        data_json=_json.dumps(
+            {
+                "ai_id": persona.id,
+                "ai_name": persona.name,
+                "type": f"ritual_{ritual_type}",
+            },
+            ensure_ascii=False,
+        ),
+    ))
+
+    await _log_trigger(db, interaction.user_id, interaction.ai_id, trigger_key)
+    print(
+        f"[emotion-sched] ritual_{ritual_type} sent for user={interaction.user_id} "
+        f"ai={interaction.ai_id}: {message[:60]}..."
+    )
+
+
+async def process_daily_rituals(db):
+    """扫描所有配置了仪式的交互关系，在合适的时间窗口内发送仪式私信。
+
+    调度频率：随主扫描循环（默认 30 分钟）调用一次。
+    支持的仪式类型：morning / night / mood_checkin / shared_habit。
+    仪式反复被限制在 EmotionTriggerLog 的 ritual_<type> 冷却内。
+    """
+    # 加载所有配置了仪式的交互记录
+    try:
+        result = await db.execute(
+            select(Interaction).where(Interaction.ritual_config_json.isnot(None))
+        )
+        interactions = result.scalars().all()
+    except Exception as exc:
+        print(f"[emotion-sched] daily rituals load failed: {exc}")
+        return
+
+    if not interactions:
+        return
+
+    # 预加载角色以避免 N+1
+    ai_ids = list({i.ai_id for i in interactions})
+    persona_res = await db.execute(
+        select(AIPersona).where(AIPersona.id.in_(ai_ids))
+    )
+    personas = {p.id: p for p in persona_res.scalars().all()}
+
+    now = datetime.utcnow()
+    current_hour_min = now.strftime("%H:%M")
+
+    for interaction in interactions:
+        config = interaction.ritual_config_json or {}
+        if not isinstance(config, dict) or not config:
+            continue
+        persona = personas.get(interaction.ai_id)
+        if not persona:
+            continue
+
+        # 早安问候
+        if config.get("morning_greeting"):
+            morning_time = config.get("morning_time", "08:00")
+            if _is_within_window(current_hour_min, morning_time, 30):
+                await _send_ritual_dm(
+                    db, interaction, persona, "morning",
+                    "Generate a warm, in-character morning greeting. "
+                    "Reference the time of day and express care.",
+                )
+
+        # 晚安问候
+        if config.get("night_greeting"):
+            night_time = config.get("night_time", "23:00")
+            if _is_within_window(current_hour_min, night_time, 30):
+                await _send_ritual_dm(
+                    db, interaction, persona, "night",
+                    "Generate a gentle good-night message. Be warm and slightly intimate.",
+                )
+
+        # 心情访谈（下午）
+        if config.get("mood_checkin"):
+            if _is_within_window(current_hour_min, "15:00", 30):
+                await _send_ritual_dm(
+                    db, interaction, persona, "mood_checkin",
+                    "Ask the user how their day is going. "
+                    "Be genuinely interested and caring.",
+                )
+
+        # 共同习惯提醒（晚间）
+        shared_habit = config.get("shared_habit")
+        if shared_habit:
+            if _is_within_window(current_hour_min, "20:00", 30):
+                await _send_ritual_dm(
+                    db, interaction, persona, "shared_habit",
+                    f"Remind about the shared habit: '{shared_habit}'. "
+                    "Be enthusiastic and suggest doing it together right now.",
+                )
+
+
+async def process_streak_updates(db):
+    """更新连续互动天数，记录总互动天数，并在达到里程碑时发放奖励。
+
+    逻辑：
+        - 近 24h 内有用户发出的聊天消息才计为“今日互动”。
+        - 若 last_streak_date == 今天 → 已计入，跳过。
+        - 若 last_streak_date == 昨天 → streak_count += 1。
+        - 若更早或 None → streak 重置为 1。
+        - total_interaction_days 加 1。
+        - 命中里程碑时：亲密加成 + 钻石奖励 + ChatMessage/Notification 提醒。
+    """
+    from datetime import date, timedelta as _td
+    from sqlalchemy import func as _sqlfunc
+
+    today_obj = date.today()
+    today_str = today_obj.isoformat()
+    yesterday_str = (today_obj - _td(days=1)).isoformat()
+
+    # 加载所有交互关系（需要判断今天是否聊过天）
+    try:
+        result = await db.execute(select(Interaction))
+        interactions = result.scalars().all()
+    except Exception as exc:
+        print(f"[emotion-sched] streak load failed: {exc}")
+        return
+
+    if not interactions:
+        return
+
+    # 预加载角色，用于里程碑推送
+    ai_ids = list({i.ai_id for i in interactions})
+    persona_res = await db.execute(
+        select(AIPersona).where(AIPersona.id.in_(ai_ids))
+    )
+    personas = {p.id: p for p in persona_res.scalars().all()}
+
+    # 检查近 36h（宽一些）内有用户发出的聊天消息的 (user_id, ai_id) 组合
+    cutoff = datetime.utcnow() - _td(hours=36)
+    try:
+        active_res = await db.execute(
+            select(ChatMessage.user_id, ChatMessage.ai_id)
+            .where(
+                ChatMessage.role == "user",
+                ChatMessage.created_at >= cutoff,
+            )
+            .group_by(ChatMessage.user_id, ChatMessage.ai_id)
+        )
+        active_pairs: set[tuple[int, int]] = {(uid, aid) for uid, aid in active_res.all()}
+    except Exception as exc:
+        print(f"[emotion-sched] streak active query failed: {exc}")
+        return
+
+    import json as _json
+    for interaction in interactions:
+        key = (interaction.user_id, interaction.ai_id)
+        # 今日未互动跳过
+        if key not in active_pairs:
+            continue
+        # 今日已计入跳过
+        if interaction.last_streak_date == today_str:
+            continue
+
+        # 计算新的 streak
+        if interaction.last_streak_date == yesterday_str:
+            new_streak = (interaction.streak_count or 0) + 1
+        else:
+            new_streak = 1
+
+        interaction.streak_count = new_streak
+        interaction.last_streak_date = today_str
+        interaction.total_interaction_days = (interaction.total_interaction_days or 0) + 1
+
+        # 检查里程碑奖励
+        milestone = _STREAK_MILESTONES.get(new_streak)
+        if milestone is None:
+            continue
+
+        # 冷却去重：同一里程碑 24h 内不重复发放
+        milestone_trigger = f"streak_milestone_{new_streak}"
+        if await _check_cooldown(
+            db, interaction.user_id, interaction.ai_id, "streak_milestone",
+        ):
+            # 也顺便写入一条里程碑专用日志，防止果动漏发
+            await _log_trigger(
+                db, interaction.user_id, interaction.ai_id, milestone_trigger,
+            )
+            continue
+
+        # 亲密加成
+        try:
+            interaction.intimacy_score = float(interaction.intimacy_score or 0.0) + float(
+                milestone.get("intimacy_bonus", 0)
+            )
+        except Exception:
+            pass
+
+        # 钻石奖励
+        gems = int(milestone.get("gems", 0))
+        if gems > 0:
+            try:
+                user_row = await db.get(User, interaction.user_id)
+                if user_row is not None:
+                    user_row.gem_balance = int(user_row.gem_balance or 0) + gems
+                    db.add(GemTransaction(
+                        user_id=interaction.user_id,
+                        amount=gems,
+                        balance_after=user_row.gem_balance,
+                        tx_type="streak_reward",
+                        reference_id=f"streak_{new_streak}_ai_{interaction.ai_id}",
+                        description=f"Streak {new_streak}-day milestone reward",
+                    ))
+            except Exception as exc:
+                print(f"[emotion-sched] streak gem grant failed: {exc}")
+
+        # 推送消息 + 聊天记录
+        persona = personas.get(interaction.ai_id)
+        if persona is not None:
+            msg_body = (
+                f"【连续{new_streak}天里程碑】"
+                f"{milestone.get('message', '')}"
+            )
+            db.add(ChatMessage(
+                user_id=interaction.user_id,
+                ai_id=interaction.ai_id,
+                role="assistant",
+                content=msg_body,
+                message_type="proactive_dm",
+                event=f"streak_{new_streak}",
+                delivered=0,
+            ))
+            db.add(ProactiveDM(
+                user_id=interaction.user_id,
+                ai_id=interaction.ai_id,
+                event=f"streak_{new_streak}",
+                message=msg_body,
+            ))
+            db.add(Notification(
+                user_id=interaction.user_id,
+                type="streak_reward",
+                title=f"连续 {new_streak} 天，{persona.name} 为你留了一条话",
+                body=msg_body[:200],
+                data_json=_json.dumps({
+                    "ai_id": persona.id,
+                    "ai_name": persona.name,
+                    "streak_count": new_streak,
+                    "gems": gems,
+                    "intimacy_bonus": float(milestone.get("intimacy_bonus", 0)),
+                }, ensure_ascii=False),
+            ))
+
+        await _log_trigger(
+            db, interaction.user_id, interaction.ai_id, "streak_milestone",
+        )
+        await _log_trigger(
+            db, interaction.user_id, interaction.ai_id, milestone_trigger,
+        )
+        print(
+            f"[emotion-sched] streak milestone {new_streak} reached for "
+            f"user={interaction.user_id} ai={interaction.ai_id}"
+        )
+
+
+async def process_subscription_rewards(db):
+    """为订阅者发放每日钻石奖励，并清理过期订阅。"""
+    from services.subscription_service import SubscriptionService
+
+    svc = SubscriptionService()
+    try:
+        await svc.process_daily_rewards(db)
+    except Exception as exc:
+        print(f"[emotion-sched] process_daily_rewards failed: {exc}")
+    try:
+        await svc.check_expirations(db)
+    except Exception as exc:
+        print(f"[emotion-sched] check_expirations failed: {exc}")
+
+
 async def run_emotion_scan():
     """
     执行一次完整的情绪状态扫描。
@@ -712,6 +1441,12 @@ async def run_emotion_scan():
     print(f"[emotion-sched] Scan starting at {datetime.now(timezone.utc).isoformat()}")
 
     async with async_session() as db:
+        # 0. 首先处理世界事件与剧情弧阶段推进
+        try:
+            await process_world_events(db)
+        except Exception as exc:
+            print(f"[emotion-sched] process_world_events failed: {exc}")
+
         # 1. 加载所有情绪状态
         result = await db.execute(select(EmotionState))
         states = result.scalars().all()
@@ -795,6 +1530,33 @@ async def run_emotion_scan():
         # 提交所有数据库更改
         await db.commit()
         print(f"[emotion-sched] Scan complete. {triggered_count} triggers executed.")
+
+        # 4. 转化触发器（变现叙事提示）
+        try:
+            await process_conversion_triggers(db)
+            await db.commit()
+        except Exception as exc:
+            print(f"[emotion-sched] process_conversion_triggers failed: {exc}")
+
+        # 5. 订阅每日奖励 + 过期清理
+        try:
+            await process_subscription_rewards(db)
+        except Exception as exc:
+            print(f"[emotion-sched] process_subscription_rewards failed: {exc}")
+
+        # 6. 每日仪式系统（早安/晚安/心情访谈/共同习惯） (Plan Task 6)
+        try:
+            await process_daily_rituals(db)
+            await db.commit()
+        except Exception as exc:
+            print(f"[emotion-sched] process_daily_rituals failed: {exc}")
+
+        # 7. Streak 连续互动更新与里程碑奖励 (Plan Task 6)
+        try:
+            await process_streak_updates(db)
+            await db.commit()
+        except Exception as exc:
+            print(f"[emotion-sched] process_streak_updates failed: {exc}")
 
 
 async def run_scheduler(interval_seconds: int = CHECK_INTERVAL):

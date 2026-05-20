@@ -31,6 +31,13 @@
 
   <title>soulpulse</title>
   <link rel="manifest" href="manifest.json">
+
+  <!-- API Configuration - override this for production deployment -->
+  <script>
+    // Set your production API URL here
+    // Example: 'https://api.yourdomain.com' or 'http://your-server-ip:8001'
+    window.API_BASE_URL = 'http://localhost:8001';
+  </script>
 </head>
 <body>
   <script src="flutter_bootstrap.js" async></script>

@@ -60,7 +60,8 @@ class _AppShellState extends ConsumerState<AppShell> {
                   onDestinationSelected: _onDestinationSelected,
                   labelType: NavigationRailLabelType.all,
                   backgroundColor: theme.colorScheme.surface,
-                  indicatorColor: theme.colorScheme.primary.withValues(alpha: 0.15),
+                  indicatorColor:
+                      theme.colorScheme.primary.withValues(alpha: 0.15),
                   selectedIconTheme: IconThemeData(
                     color: theme.colorScheme.primary,
                   ),

@@ -41,6 +41,11 @@ import '../../features/feed/story_player_page.dart';
 import '../../features/legal/legal_pages.dart';
 import '../../features/notifications/notification_page.dart';
 import '../../features/admin/admin_shell.dart';
+import '../../features/gallery/gallery_page.dart';
+import '../../features/outfits/outfits_page.dart';
+import '../../features/streak/streak_page.dart';
+import '../../features/subscription/subscription_page.dart';
+import '../../features/scenes/scenes_page.dart';
 
 /// 根导航器的 GlobalKey
 ///
@@ -251,6 +256,46 @@ final routerProvider = Provider<GoRouter>((ref) {
         },
       ),
 
+      /// CG Gallery page route
+      GoRoute(
+        path: '/gallery/:personaId',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) {
+          final personaId = int.parse(state.pathParameters['personaId']!);
+          final name = state.uri.queryParameters['name'] ?? 'AI';
+          return GalleryPage(personaId: personaId, personaName: name);
+        },
+      ),
+
+      /// Outfits page route
+      GoRoute(
+        path: '/outfits/:personaId',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) {
+          final personaId = int.parse(state.pathParameters['personaId']!);
+          final name = state.uri.queryParameters['name'] ?? 'AI';
+          return OutfitsPage(personaId: personaId, personaName: name);
+        },
+      ),
+
+      /// Streak & Ritual page route
+      GoRoute(
+        path: '/streak/:personaId',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) {
+          final personaId = int.parse(state.pathParameters['personaId']!);
+          final name = state.uri.queryParameters['name'] ?? 'AI';
+          return StreakPage(personaId: personaId, personaName: name);
+        },
+      ),
+
+      /// Subscription page route
+      GoRoute(
+        path: '/subscription',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) => const SubscriptionPage(),
+      ),
+
       /// 设置页面路由
       GoRoute(
         path: '/settings',
@@ -263,6 +308,28 @@ final routerProvider = Provider<GoRouter>((ref) {
         path: '/notifications',
         parentNavigatorKey: _rootNavigatorKey,
         builder: (context, state) => const NotificationPage(),
+      ),
+
+      /// 场景列表页面路由
+      ///
+      /// 显示指定 AI 的所有可用场景
+      ///
+      /// 路径参数：
+      /// - personaId: AI 人设的 ID
+      ///
+      /// 查询参数：
+      /// - name: AI 名称
+      GoRoute(
+        path: '/scenes/:personaId',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) {
+          final personaId = int.parse(state.pathParameters['personaId']!);
+          final personaName = state.uri.queryParameters['name'] ?? 'AI';
+          return ScenesPage(
+            personaId: personaId,
+            personaName: personaName,
+          );
+        },
       ),
 
       // ================== 法律条款页面 ==================

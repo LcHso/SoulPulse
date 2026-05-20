@@ -19,8 +19,9 @@ SoulPulse AI 角色模型
 """
 
 from datetime import datetime
+from typing import Optional
 
-from sqlalchemy import String, Integer, Text, DateTime, func
+from sqlalchemy import String, Integer, Text, DateTime, JSON, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -96,6 +97,31 @@ class AIPersona(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     # 是否激活：0=禁用（软删除）, 1=激活，建立索引便于筛选
     is_active: Mapped[int] = mapped_column(Integer, default=1, index=True)
+
+    # ── 语音合成配置（Voice Synthesis Config）─────────────────────
+    # 角色专属的语音合成参数，示例：
+    # {
+    #     "voice_id": "cosyvoice-starlin",
+    #     "speed": 1.0,
+    #     "pitch": 1.1,
+    #     "timbre": "youthful_male",
+    #     "style": "gentle"
+    # }
+    voice_config_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # ── 世界观扩展字段（Worldbuilding Expansion）──────────────────────────
+    # 家族背景：详细的家庭故事，用于深度对话和角色塑造
+    family_background: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # 每日作息：以小时为键的日程活动 JSON，例如
+    # {"7": "morning run", "9": "work", "18": "cooking", "22": "reading"}
+    daily_routine_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # 秘密分层：5 条带亲密度阈值的秘密 JSON 数组，例如
+    # [{"intimacy": 3, "secret": "..."}, ...]
+    secret_layers_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # 角色剧情弧 ID：可选外键，关联 character_arcs 表，用于推进剧情
+    character_arc_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("character_arcs.id"), nullable=True,
+    )
 
     # ── 时间戳字段 ──────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

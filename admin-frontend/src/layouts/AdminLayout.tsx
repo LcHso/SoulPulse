@@ -12,6 +12,12 @@ import {
   LogoutOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  PlayCircleOutlined,
+  SkinOutlined,
+  RocketOutlined,
+  FileImageOutlined,
+  CrownOutlined,
+  GlobalOutlined,
 } from '@ant-design/icons';
 import { useAuthStore } from '../stores/authStore';
 
@@ -21,9 +27,15 @@ const menuItems = [
   { key: '/admin', icon: <DashboardOutlined />, label: 'Dashboard' },
   { key: '/admin/aigc', icon: <PictureOutlined />, label: 'AIGC Control' },
   { key: '/admin/persona', icon: <UserSwitchOutlined />, label: 'Persona Lab' },
+  { key: '/admin/scenes', icon: <PlayCircleOutlined />, label: 'Scenes' },
+  { key: '/admin/outfits', icon: <SkinOutlined />, label: 'Outfits' },
+  { key: '/admin/launches', icon: <RocketOutlined />, label: 'Launches' },
+  { key: '/admin/assets', icon: <FileImageOutlined />, label: 'Assets' },
   { key: '/admin/memory', icon: <DatabaseOutlined />, label: 'Memory' },
   { key: '/admin/users', icon: <TeamOutlined />, label: 'Users & Safety' },
   { key: '/admin/commerce', icon: <ShoppingOutlined />, label: 'Commerce' },
+  { key: '/admin/subscriptions', icon: <CrownOutlined />, label: 'Subscriptions' },
+  { key: '/admin/world-events', icon: <GlobalOutlined />, label: 'World Events' },
   { key: '/admin/devops', icon: <ToolOutlined />, label: 'DevOps' },
 ];
 

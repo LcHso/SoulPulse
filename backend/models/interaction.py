@@ -24,7 +24,7 @@ SoulPulse 用户-角色互动关系模型
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, Text, DateTime, ForeignKey, func
+from sqlalchemy import String, Integer, Float, Text, DateTime, ForeignKey, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -69,6 +69,34 @@ class Interaction(Base):
     special_nickname: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, default=None)
     # 是否已提议昵称：避免 AI 重复提议昵称（SQLite 无布尔类型，用 Integer 模拟）
     nickname_proposed: Mapped[bool] = mapped_column(Integer, default=0)
+
+    # ── 场景系统字段 (Plan Task 3) ──────────────────────────────────────────
+    # 当前激活的对话场景 ID：当用户进入沉浸式场景（约会、深夜电话等）时设置，
+    # 由 chat_service 在生成回复时读取以叠加 system_prompt_addon。
+    # 场景结束/放弃时清空（设为 None）。
+    active_scene_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("chat_scenes.id"), nullable=True, default=None
+    )
+
+    # ── 留存机制字段 (Plan Task 6) ──────────────────────────────────────────
+    # 连续互动天数：用户与该角色连续聊天的天数（streak）
+    streak_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 上次计入 streak 的日期（"YYYY-MM-DD" 字符串），用于按日去重并判断连续性
+    last_streak_date: Mapped[Optional[str]] = mapped_column(
+        String(10), nullable=True, default=None
+    )
+    # 用户配置的每日仪式偏好（JSON），示例：
+    # {
+    #   "morning_greeting": true, "morning_time": "08:00",
+    #   "night_greeting": true, "night_time": "23:00",
+    #   "mood_checkin": true,
+    #   "shared_habit": "每天一首歌推荐"
+    # }
+    ritual_config_json: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True, default=None
+    )
+    # 用户与该角色累计互动天数（不要求连续）
+    total_interaction_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     # ── 时间戳字段 ──────────────────────────────────────────
     # 更新时间：记录互动状态的最后修改时间

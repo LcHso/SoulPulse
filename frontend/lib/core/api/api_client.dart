@@ -59,6 +59,9 @@ class ApiClient {
   /// API 服务器基础 URL
   ///
   /// 可通过编译时环境变量 API_BASE_URL 配置，默认为 localhost:8001
+  ///
+  /// 部署到生产环境时，使用以下命令构建：
+  ///   flutter build web --dart-define=API_BASE_URL=https://your-api-domain.com
   static const String baseUrl = String.fromEnvironment(
     'API_BASE_URL',
     defaultValue: 'http://localhost:8001',

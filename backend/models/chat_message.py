@@ -25,7 +25,7 @@ SoulPulse 聊天消息模型
 
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Text, DateTime, ForeignKey, Index, func
+from sqlalchemy import Integer, String, Text, DateTime, ForeignKey, Index, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -91,6 +91,16 @@ class ChatMessage(Base):
     summary_group: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("chat_summaries.id"), nullable=True,
     )
+
+    # ── 多模态字段（Multimodal Support）──────────────────────────────────────
+    # 媒体类型："image" / "voice" / "video"，文本消息为 None
+    media_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 用户上传的媒体文件 URL（图片/语音/视频）
+    media_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 媒体元数据（JSON）：时长、分辨率、转录文本等
+    media_metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # AI 生成的语音回复音频 URL（assistant 消息的 TTS 输出）
+    voice_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     # ── 时间戳字段 ──────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(

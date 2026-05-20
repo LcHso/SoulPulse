@@ -28,6 +28,10 @@ import 'package:google_fonts/google_fonts.dart';
 import '../../core/api/api_client.dart';
 import '../../core/api/ws_client.dart';
 import '../../core/theme/character_theme.dart';
+import 'services/media_chat_service.dart';
+import 'widgets/media_attachment_bar.dart';
+import 'widgets/media_message_bubble.dart';
+import 'widgets/voice_recorder.dart';
 
 /// 聊天页面组件
 ///
@@ -120,6 +124,17 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
   /// AI 角色时区（如 "Asia/Shanghai"）
   String? _personaTimezone;
+
+  /// Typing indicator context: null = normal, 'photo' | 'voice' | 'video' | 'generating'
+  String? _typingVariant;
+
+  /// Whether the voice recorder panel is open
+  bool _showVoiceRecorder = false;
+
+  /// Pending media queued for the next send action
+  Uint8List? _pendingMediaBytes;
+  String? _pendingMediaName;
+  String? _pendingMediaType;
 
   /// 正在输入动画控制器
   ///
@@ -325,10 +340,15 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     final text = data['text'] as String? ?? '';
     final messageId = data['message_id'] as int?;
     final timestamp = data['created_at'] as String?;
+    final voiceUrl = data['voice_url'] as String?;
+    final mediaUrl = data['media_url'] as String?;
+    final mediaType = data['media_type'] as String?;
+    final voiceDuration = data['voice_duration'] as int?;
 
     setState(() {
       // 停止发送状态
       _sending = false;
+      _typingVariant = null;
 
       // 添加 AI 回复消息
       _messages.add(_ChatMsg(
@@ -336,6 +356,10 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
         text: text,
         isUser: false,
         timestamp: timestamp ?? DateTime.now().toIso8601String(),
+        voiceUrl: voiceUrl,
+        mediaUrl: mediaUrl,
+        mediaType: mediaType,
+        voiceDuration: voiceDuration,
       ));
     });
 
@@ -411,6 +435,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
 
       // 设置发送状态
       _sending = true;
+      _typingVariant = null;
     });
 
     _scrollToBottom();
@@ -457,6 +482,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
       if (mounted) {
         setState(() {
           _sending = false;
+          _typingVariant = null;
 
           // 显示错误提示
           _messages.add(_ChatMsg(
@@ -469,11 +495,142 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
     }
   }
 
-  // ================== 消息删除 ==================
+  // ================== 媒体消息发送 ==================
+
+  /// 上传待发送的媒体文件并获取 AI 回复
+  Future<void> _sendMedia() async {
+    final bytes = _pendingMediaBytes;
+    final name = _pendingMediaName;
+    final type = _pendingMediaType;
+    if (bytes == null || name == null || type == null) return;
+
+    final caption = _messageCtrl.text.trim();
+
+    setState(() {
+      _pendingMediaBytes = null;
+      _pendingMediaName = null;
+      _pendingMediaType = null;
+      _sending = true;
+      _typingVariant =
+          type == 'image' ? 'photo' : (type == 'video' ? 'video' : null);
+
+      // Optimistic placeholder: show the outgoing media bubble immediately
+      _messages.add(_ChatMsg(
+        text: caption,
+        isUser: true,
+        mediaType: type,
+        timestamp: DateTime.now().toIso8601String(),
+      ));
+      _messageCtrl.clear();
+    });
+    _scrollToBottom();
+
+    try {
+      final result = await MediaChatService.sendMedia(
+        personaId: widget.aiId,
+        fileBytes: bytes,
+        fileName: name,
+        mediaType: type,
+        caption: caption.isNotEmpty ? caption : null,
+      );
+
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _typingVariant = null;
+          if (result.replyText != null ||
+              result.voiceUrl != null ||
+              result.mediaUrl != null) {
+            _messages.add(_ChatMsg(
+              id: result.messageId,
+              text: result.replyText ?? '',
+              isUser: false,
+              mediaUrl: result.mediaUrl,
+              mediaType: result.mediaType,
+              voiceUrl: result.voiceUrl,
+              voiceDuration: result.voiceDuration,
+              timestamp: DateTime.now().toIso8601String(),
+            ));
+          }
+        });
+        _scrollToBottom();
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _sending = false;
+          _typingVariant = null;
+          _messages.add(_ChatMsg(
+            text: 'Failed to send media.',
+            isUser: false,
+            isError: true,
+          ));
+        });
+      }
+    }
+  }
+
+  /// Called by [VoiceRecorder] when the user releases the mic button.
+  void _onVoiceRecorded(
+      Uint8List bytes, String fileName, int durationSeconds) {
+    setState(() {
+      _showVoiceRecorder = false;
+      _sending = true;
+      _typingVariant = 'voice';
+
+      // Optimistic outgoing voice bubble
+      _messages.add(_ChatMsg(
+        text: '',
+        isUser: true,
+        voiceUrl: '',
+        voiceDuration: durationSeconds,
+        timestamp: DateTime.now().toIso8601String(),
+      ));
+    });
+    _scrollToBottom();
+
+    MediaChatService.sendMedia(
+      personaId: widget.aiId,
+      fileBytes: bytes,
+      fileName: fileName,
+      mediaType: 'voice',
+    ).then((result) {
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+        _typingVariant = null;
+        if (result.replyText != null || result.voiceUrl != null) {
+          _messages.add(_ChatMsg(
+            id: result.messageId,
+            text: result.replyText ?? '',
+            isUser: false,
+            voiceUrl: result.voiceUrl,
+            voiceDuration: result.voiceDuration,
+            timestamp: DateTime.now().toIso8601String(),
+          ));
+        }
+      });
+      _scrollToBottom();
+    }).catchError((e) {
+      if (!mounted) return;
+      setState(() {
+        _sending = false;
+        _typingVariant = null;
+      });
+    });
+  }
+
+  /// Called by [MediaAttachmentBar] when the user picks a photo or video.
+  void _onMediaSelected(
+      Uint8List bytes, String fileName, String mediaType) {
+    setState(() {
+      _pendingMediaBytes = bytes;
+      _pendingMediaName = fileName;
+      _pendingMediaType = mediaType;
+    });
+  }
 
   /// 删除消息
-  ///
-  /// 仅支持删除用户发送的消息
   ///
   /// [index] 消息在列表中的索引
   Future<void> _deleteMessage(int index) async {
@@ -918,6 +1075,7 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
                   animationController: _typingAnimCtrl,
                   aiName: widget.aiName,
                   dotColor: characterColors.primary,
+                  typingVariant: _typingVariant,
                 ),
               ),
             ),
@@ -939,65 +1097,113 @@ class _ChatPageState extends State<ChatPage> with TickerProviderStateMixin {
             ),
             child: SafeArea(
               top: false,
-              child: Row(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  /// 消息输入框
-                  Expanded(
-                    child: TextField(
-                      controller: _messageCtrl,
-                      textInputAction: TextInputAction.send,
-                      onSubmitted: (_) => _send(), // 回车发送
-                      decoration: InputDecoration(
-                        hintText: 'Message...',
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide(
-                            color: Theme.of(context).dividerTheme.color ??
-                                Theme.of(context)
-                                    .colorScheme
-                                    .outline
-                                    .withValues(alpha: 0.3),
+                  // ── Pending media preview chip ────────────────────────────
+                  if (_pendingMediaBytes != null)
+                    MediaPreviewChip(
+                      bytes: _pendingMediaBytes!,
+                      mediaType: _pendingMediaType ?? 'image',
+                      onRemove: () => setState(() {
+                        _pendingMediaBytes = null;
+                        _pendingMediaName = null;
+                        _pendingMediaType = null;
+                      }),
+                    ),
+
+                  // ── Voice recorder panel ─────────────────────────────
+                  if (_showVoiceRecorder)
+                    VoiceRecorder(
+                      characterColors: characterColors,
+                      onRecorded: _onVoiceRecorded,
+                      onCancelled: () =>
+                          setState(() => _showVoiceRecorder = false),
+                    ),
+
+                  // ── Attachment buttons + text field + send button ───────
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      // Media attachment buttons
+                      MediaAttachmentBar(
+                        characterColors: characterColors,
+                        enabled: !_sending,
+                        onMediaSelected: _onMediaSelected,
+                        onMicTapped: () => setState(
+                            () => _showVoiceRecorder = !_showVoiceRecorder),
+                      ),
+
+                      /// 消息输入框
+                      Expanded(
+                        child: TextField(
+                          controller: _messageCtrl,
+                          textInputAction: TextInputAction.send,
+                          onSubmitted: (_) => _send(), // 回车发送
+                          decoration: InputDecoration(
+                            hintText: _pendingMediaBytes != null
+                                ? 'Add a caption…'
+                                : 'Message...',
+                            border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide(
+                                color: Theme.of(context).dividerTheme.color ??
+                                    Theme.of(context)
+                                        .colorScheme
+                                        .outline
+                                        .withValues(alpha: 0.3),
+                              ),
+                            ),
+                            enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide(
+                                color: Theme.of(context).dividerTheme.color ??
+                                    Theme.of(context)
+                                        .colorScheme
+                                        .outline
+                                        .withValues(alpha: 0.3),
+                              ),
+                            ),
+                            focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide(
+                                color: Theme.of(context).colorScheme.primary,
+                                width: 1,
+                              ),
+                            ),
+                            filled: true,
+                            fillColor: Theme.of(context).colorScheme.surface,
+                            contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 20, vertical: 10),
                           ),
                         ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide(
-                            color: Theme.of(context).dividerTheme.color ??
-                                Theme.of(context)
-                                    .colorScheme
-                                    .outline
-                                    .withValues(alpha: 0.3),
-                          ),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(24),
-                          borderSide: BorderSide(
+                      ),
+
+                      const SizedBox(width: 8),
+
+                      /// 发送按钮
+                      GestureDetector(
+                        onTap: _sending
+                            ? null
+                            : (_pendingMediaBytes != null
+                                ? _sendMedia
+                                : _send),
+                        child: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
                             color: Theme.of(context).colorScheme.primary,
-                            width: 1,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            _pendingMediaBytes != null
+                                ? Icons.send_rounded
+                                : Icons.send,
+                            color: Colors.white,
+                            size: 20,
                           ),
                         ),
-                        filled: true,
-                        fillColor: Theme.of(context).colorScheme.surface,
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 10),
                       ),
-                    ),
-                  ),
-
-                  const SizedBox(width: 8),
-
-                  /// 发送按钮
-                  GestureDetector(
-                    onTap: _sending ? null : _send,
-                    child: Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.primary,
-                        shape: BoxShape.circle,
-                      ),
-                      child:
-                          const Icon(Icons.send, color: Colors.white, size: 20),
-                    ),
+                    ],
                   ),
                 ],
               ),
@@ -1026,12 +1232,36 @@ class _TypingIndicator extends StatelessWidget {
   /// 圆点颜色
   final Color dotColor;
 
+  /// Optional typing context variant.
+  /// null = normal typing
+  /// 'photo'      = 正在看你的照片
+  /// 'voice'      = 正在录语音
+  /// 'video'      = 正在看视频
+  /// 'generating' = 正在给你拍照
+  final String? typingVariant;
+
   /// 构造函数
   const _TypingIndicator({
     required this.animationController,
     required this.aiName,
     this.dotColor = Colors.grey,
+    this.typingVariant,
   });
+
+  String _statusText() {
+    switch (typingVariant) {
+      case 'photo':
+        return '正在看你的照片… ';
+      case 'voice':
+        return '正在录语音… ';
+      case 'video':
+        return '正在看视频… ';
+      case 'generating':
+        return '正在给你拍照… ';
+      default:
+        return '正在输入… ';
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1040,7 +1270,7 @@ class _TypingIndicator extends StatelessWidget {
       children: [
         /// AI 名称前缀
         Text(
-          '$aiName is typing ',
+          '$aiName ${_statusText()}',
           style: GoogleFonts.inter(
               fontSize: 12, color: Colors.grey, fontStyle: FontStyle.italic),
         ),
@@ -1311,6 +1541,20 @@ class _ChatMsg {
   /// 消息时间戳（ISO 8601 格式）
   final String? timestamp;
 
+  // ─── media fields ────────────────────────────────────────────────
+
+  /// URL of an uploaded image or video.
+  final String? mediaUrl;
+
+  /// Media type string: "image", "voice", "video". Null for text-only.
+  final String? mediaType;
+
+  /// URL of a voice clip (user recording or AI voice reply).
+  final String? voiceUrl;
+
+  /// Duration of a voice clip in whole seconds.
+  final int? voiceDuration;
+
   /// 构造函数
   _ChatMsg({
     this.id,
@@ -1321,6 +1565,10 @@ class _ChatMsg {
     this.messageType = 'chat',
     this.event,
     this.timestamp,
+    this.mediaUrl,
+    this.mediaType,
+    this.voiceUrl,
+    this.voiceDuration,
   });
 
   /// 从 JSON 数据创建消息对象
@@ -1338,6 +1586,10 @@ class _ChatMsg {
       messageType: json['message_type'] as String? ?? 'chat',
       event: json['event'] as String?,
       timestamp: json['created_at'] as String?,
+      mediaUrl: json['media_url'] as String?,
+      mediaType: json['media_type'] as String?,
+      voiceUrl: json['voice_url'] as String?,
+      voiceDuration: json['voice_duration'] as int?,
     );
   }
 }
@@ -1391,6 +1643,62 @@ class _MessageBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // ================== 媒体消息气泡 ==================
+    // Render media content (image / voice / video) when present.
+    // A text caption is shown below if msg.text is also non-empty.
+    if ((msg.mediaUrl != null && msg.mediaUrl!.isNotEmpty) ||
+        (msg.voiceUrl != null && msg.voiceUrl!.isNotEmpty)) {
+      return Align(
+        alignment:
+            msg.isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: Column(
+          crossAxisAlignment:
+              msg.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            MediaMessageBubble(
+              mediaUrl: msg.mediaUrl,
+              mediaType: msg.mediaType,
+              voiceUrl: msg.voiceUrl,
+              voiceDuration: msg.voiceDuration,
+              isUser: msg.isUser,
+              characterColors: characterColors,
+              isDark: isDark,
+            ),
+            if (msg.text.isNotEmpty)
+              Container(
+                margin: const EdgeInsets.only(bottom: 4, top: 2),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 14, vertical: 8),
+                constraints: BoxConstraints(
+                    maxWidth:
+                        MediaQuery.of(context).size.width * 0.72),
+                decoration: BoxDecoration(
+                  color: msg.isUser
+                      ? Theme.of(context)
+                          .colorScheme
+                          .primary
+                          .withValues(alpha: 0.10)
+                      : characterColors.primary
+                          .withValues(alpha: isDark ? 0.12 : 0.08),
+                  borderRadius: BorderRadius.only(
+                    topLeft: const Radius.circular(14),
+                    topRight: const Radius.circular(14),
+                    bottomLeft: Radius.circular(msg.isUser ? 14 : 4),
+                    bottomRight: Radius.circular(msg.isUser ? 4 : 14),
+                  ),
+                ),
+                child: Text(
+                  msg.text,
+                  style: GoogleFonts.inter(
+                      fontSize: 14,
+                      color: Theme.of(context).colorScheme.onSurface),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
+
     // ================== 上下文消息气泡 ==================
     /// 从帖子发起聊天时显示的上下文提示
     if (msg.isContext) {

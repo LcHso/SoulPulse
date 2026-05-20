@@ -105,6 +105,25 @@ async def init_db():
     import models.virtual_gift  # noqa: F401
     import models.gem_transaction  # noqa: F401
     import models.milestone_config  # noqa: F401
+    # 动漫化视觉系统（Plan Task 8）
+    import models.character_design  # noqa: F401
+    import models.cg_illustration  # noqa: F401
+    import models.user_cg_collection  # noqa: F401
+    # 资产管线 (Plan Task 5)
+    import models.asset_registry  # noqa: F401
+    # 对话场景与互动剧情 (Plan Task 3)
+    import models.chat_scene  # noqa: F401
+    # 服装与场景系统 (Plan Task 2)
+    import models.outfit_config  # noqa: F401
+    # 世界观扩展 (Plan Task 1)
+    import models.world_event  # noqa: F401
+    import models.persona_relationship  # noqa: F401
+    import models.character_arc  # noqa: F401
+    # 商业化深化 (Plan Task 4)
+    import models.subscription  # noqa: F401
+    import models.event_campaign  # noqa: F401
+    # 角色发布管线与轮换 (Plan Task 9.3-9.4)
+    import models.character_launch  # noqa: F401
 
     # 创建所有数据表
     async with engine.begin() as conn:
@@ -145,3 +164,58 @@ async def init_db():
                     text("ALTER TABLE posts ADD COLUMN post_type VARCHAR(50) DEFAULT 'image_only'")
                 )
                 print("[database] Added post_type column to posts table")
+
+            # ── 数据库迁移：chat_messages 表添加多模态字段 ──────────────────────────────
+            # 支持图片/语音/视频消息及 AI 语音回复
+            chat_msg_migrations = {
+                "media_type": "ALTER TABLE chat_messages ADD COLUMN media_type VARCHAR(20)",
+                "media_url": "ALTER TABLE chat_messages ADD COLUMN media_url VARCHAR(500)",
+                "media_metadata_json": "ALTER TABLE chat_messages ADD COLUMN media_metadata_json JSON",
+                "voice_url": "ALTER TABLE chat_messages ADD COLUMN voice_url VARCHAR(500)",
+            }
+            for col, sql in chat_msg_migrations.items():
+                try:
+                    await conn.execute(text(f"SELECT {col} FROM chat_messages LIMIT 1"))
+                except Exception:
+                    await conn.execute(text(sql))
+                    print(f"[database] Added {col} column to chat_messages table")
+
+            # ── 数据库迁移：ai_personas 表添加 voice_config_json 列 ──────────────────────
+            # 用于角色专属的 TTS 语音合成参数
+            try:
+                await conn.execute(text("SELECT voice_config_json FROM ai_personas LIMIT 1"))
+            except Exception:
+                await conn.execute(
+                    text("ALTER TABLE ai_personas ADD COLUMN voice_config_json JSON")
+                )
+                print("[database] Added voice_config_json column to ai_personas table")
+
+            # ── 数据库迁移：ai_personas 表添加世界观扩展字段 ───────────────────────
+            # family_background / daily_routine_json / secret_layers_json / character_arc_id
+            persona_world_migrations = {
+                "family_background": "ALTER TABLE ai_personas ADD COLUMN family_background TEXT",
+                "daily_routine_json": "ALTER TABLE ai_personas ADD COLUMN daily_routine_json JSON",
+                "secret_layers_json": "ALTER TABLE ai_personas ADD COLUMN secret_layers_json JSON",
+                "character_arc_id": "ALTER TABLE ai_personas ADD COLUMN character_arc_id INTEGER",
+            }
+            for col, sql in persona_world_migrations.items():
+                try:
+                    await conn.execute(text(f"SELECT {col} FROM ai_personas LIMIT 1"))
+                except Exception:
+                    await conn.execute(text(sql))
+                    print(f"[database] Added {col} column to ai_personas table")
+
+            # ── 数据库迁移：interactions 表添加留存机制字段 (Plan Task 6) ─────────────
+            # streak_count / last_streak_date / ritual_config_json / total_interaction_days
+            interaction_retention_migrations = {
+                "streak_count": "ALTER TABLE interactions ADD COLUMN streak_count INTEGER DEFAULT 0",
+                "last_streak_date": "ALTER TABLE interactions ADD COLUMN last_streak_date VARCHAR(10)",
+                "ritual_config_json": "ALTER TABLE interactions ADD COLUMN ritual_config_json JSON",
+                "total_interaction_days": "ALTER TABLE interactions ADD COLUMN total_interaction_days INTEGER DEFAULT 0",
+            }
+            for col, sql in interaction_retention_migrations.items():
+                try:
+                    await conn.execute(text(f"SELECT {col} FROM interactions LIMIT 1"))
+                except Exception:
+                    await conn.execute(text(sql))
+                    print(f"[database] Added {col} column to interactions table")

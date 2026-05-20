@@ -42,9 +42,22 @@ WS     /api/chat/ws/{ai_id}?token= - WebSocket 实时聊天
 
 import json
 import logging
+import time
+import uuid
+from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, update, delete, and_, case
@@ -57,7 +70,12 @@ from models.user import User
 from models.chat_message import ChatMessage
 from models.ai_persona import AIPersona
 from models.interaction import Interaction
+from models.emotion_state import EmotionState
+from models.virtual_gift import VirtualGift
+from models.gem_transaction import GemTransaction
+from models.notification import Notification
 from services import chat_service
+from services.scene_service import scene_service
 
 logger = logging.getLogger(__name__)
 
@@ -479,6 +497,139 @@ async def get_chat_history(
     )
 
 
+# ── POST /{persona_id}/media 多模态媒体上传 ──────────────────────
+
+# 允许上传的文件扩展名（按媒体类型划分）
+_ALLOWED_MEDIA_EXTS = {
+    "image": {".jpg", ".jpeg", ".png", ".webp", ".gif"},
+    "voice": {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".webm"},
+    "video": {".mp4", ".mov", ".webm"},
+}
+# 单个媒体文件最大上传体积（字节）
+_MAX_MEDIA_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+
+# chat_media 绝对路径（与 main.py 挂载的 /static 一致）
+_CHAT_MEDIA_DIR = Path(__file__).resolve().parent.parent.parent / "static" / "chat_media"
+
+
+class MediaUploadResponse(BaseModel):
+    """多模态上传响应模型。"""
+    reply: str
+    intimacy: float
+    user_message_id: int
+    ai_message_id: int
+    media_type: str
+    media_url: str
+    voice_url: str | None = None
+    nickname_proposal: dict | None = None
+    emotion_hint: dict | None = None
+
+
+@router.post("/{persona_id}/media", response_model=MediaUploadResponse)
+async def upload_chat_media(
+    persona_id: int,
+    file: UploadFile = File(...),
+    media_type: str = Form(...),
+    caption: str = Form(""),
+    generate_voice_reply: bool = Form(False),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    上传媒体文件（图片/语音/视频）并获取 AI 角色的多模态回复。
+
+    处理流程：
+    1. 验证 media_type 与文件扩展名、大小。
+    2. 保存文件到 backend/static/chat_media/{media_type}/...
+    3. 调用 chat_service.handle_media_message() 路由到 vision/voice 服务。
+    4. 返回 AI 回复（含可选语音 URL）。
+
+    Args:
+        persona_id: AI 角色 ID
+        file: 上传的媒体文件
+        media_type: "image" / "voice" / "video"
+        caption: 随媒体附带的文本（可选）
+        generate_voice_reply: 是否同时生成 AI 语音回复
+        current_user: 当前认证用户
+        db: 异步数据库会话
+    """
+    # ── 参数验证 ─────────────────────────────────────
+    if media_type not in _ALLOWED_MEDIA_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid media_type: {media_type}. Allowed: image/voice/video",
+        )
+
+    # 获取扩展名
+    filename = file.filename or ""
+    ext = Path(filename).suffix.lower() if filename else ""
+    if ext not in _ALLOWED_MEDIA_EXTS[media_type]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File extension '{ext}' not allowed for {media_type}. "
+                f"Allowed: {sorted(_ALLOWED_MEDIA_EXTS[media_type])}"
+            ),
+        )
+
+    # 读取并验证文件大小
+    contents = await file.read()
+    if len(contents) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(contents) > _MAX_MEDIA_SIZE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {_MAX_MEDIA_SIZE_BYTES} bytes)",
+        )
+
+    # ── 保存到本地静态目录 ────────────────────────────────
+    target_dir = _CHAT_MEDIA_DIR / media_type
+    target_dir.mkdir(parents=True, exist_ok=True)
+    ts = int(time.time())
+    safe_name = f"{current_user.id}_{ts}_{uuid.uuid4().hex[:8]}{ext}"
+    fpath = target_dir / safe_name
+    try:
+        with open(fpath, "wb") as f:
+            f.write(contents)
+    except Exception as e:
+        logger.exception("Failed to save uploaded media")
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {e}")
+
+    rel_url = f"/static/chat_media/{media_type}/{safe_name}"
+
+    # ── 路由到多模态服务 ──────────────────────────────────
+    try:
+        result = await chat_service.handle_media_message(
+            db=db,
+            user=current_user,
+            ai_id=persona_id,
+            media_type=media_type,
+            media_url=rel_url,
+            caption=caption,
+            generate_voice_reply=generate_voice_reply,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception:
+        logger.exception(
+            "Media handler error for user_id=%d persona_id=%d",
+            current_user.id, persona_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to process media")
+
+    return MediaUploadResponse(
+        reply=result.reply,
+        intimacy=result.intimacy,
+        user_message_id=result.user_message_id,
+        ai_message_id=result.ai_message_id,
+        media_type=media_type,
+        media_url=rel_url,
+        voice_url=result.voice_url,
+        nickname_proposal=result.nickname_proposal,
+        emotion_hint=result.emotion_hint,
+    )
+
+
 # ── WebSocket 实时聊天 ───────────────────────────────────────────────────
 
 @router.websocket("/ws/{ai_id}")
@@ -623,3 +774,578 @@ async def _send_error(websocket: WebSocket, code: str, detail: str) -> None:
         "type": "error",
         "data": {"code": code, "detail": detail},
     })
+
+
+# ── 场景系统端点 (Plan Task 3) ────────────────────────────────────────
+
+class SceneChoiceRequest(BaseModel):
+    """交互式场景选择请求体。"""
+    choice_key: str
+
+
+@router.get("/scenes/{persona_id}")
+async def list_available_scenes(
+    persona_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取指定角色可用的对话场景列表。
+
+    返回项会根据用户与该角色的亲密度、解锁状态标记 ``available`` 及
+    ``locked_reason``，以供前端渲染场景选择器。
+    """
+    persona_result = await db.execute(
+        select(AIPersona).where(AIPersona.id == persona_id)
+    )
+    if persona_result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    interaction_result = await db.execute(
+        select(Interaction).where(
+            Interaction.user_id == current_user.id,
+            Interaction.ai_id == persona_id,
+        )
+    )
+    interaction = interaction_result.scalar_one_or_none()
+    intimacy_score = float(interaction.intimacy_score) if interaction else 0.0
+
+    scenes = await scene_service.get_available_scenes(
+        db=db,
+        persona_id=persona_id,
+        user_id=current_user.id,
+        intimacy_score=intimacy_score,
+    )
+    return {
+        "persona_id": persona_id,
+        "intimacy_score": intimacy_score,
+        "scenes": scenes,
+    }
+
+
+@router.post("/scenes/{persona_id}/{scene_id}/start")
+async def start_scene(
+    persona_id: int,
+    scene_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """启动一个场景会话。验证访问权限后返回初始上下文。"""
+    try:
+        context = await scene_service.start_scene(
+            db=db,
+            user_id=current_user.id,
+            persona_id=persona_id,
+            scene_id=scene_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return context
+
+
+@router.post("/scenes/{persona_id}/end")
+async def end_scene(
+    persona_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """结束 / 放弃当前激活场景。"""
+    await scene_service.abandon_scene(
+        db=db,
+        user_id=current_user.id,
+        persona_id=persona_id,
+    )
+    return {"message": "Scene ended"}
+
+
+@router.get("/scenes/{persona_id}/active")
+async def get_active_scene(
+    persona_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取当前激活场景上下文（如果有）。"""
+    context = await scene_service.get_active_scene_context(
+        db=db,
+        user_id=current_user.id,
+        persona_id=persona_id,
+    )
+    return {"active_scene": context}
+
+
+@router.post("/scenes/{persona_id}/choice")
+async def make_scene_choice(
+    persona_id: int,
+    body: SceneChoiceRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """记录用户在交互式场景中选择的分支。"""
+    try:
+        await scene_service.record_choice(
+            db=db,
+            user_id=current_user.id,
+            persona_id=persona_id,
+            choice_key=body.choice_key,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"message": "Choice recorded", "choice_key": body.choice_key}
+
+
+# ── 用户发起交互变种与留存机制端点 (Plan Task 6) ─────────────────────
+
+import re
+
+from services.aliyun_ai_service import generate_proactive_dm, generate_image_prompt
+
+# Streak 里程碑配置——与 emotion_scheduler.py 中一致
+_STREAK_MILESTONE_TABLE: dict[int, dict] = {
+    7:   {"intimacy_bonus": 3,  "gems": 10,  "message": "连续7天的陪伴"},
+    14:  {"intimacy_bonus": 5,  "gems": 20,  "message": "两周了"},
+    30:  {"intimacy_bonus": 10, "gems": 50,  "message": "一个月的默契"},
+    60:  {"intimacy_bonus": 15, "gems": 100, "message": "60天"},
+    100: {"intimacy_bonus": 25, "gems": 200, "message": "100天纪念"},
+}
+
+_TIME_HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")
+
+# 自拍请求所需能量阈值
+_SELFIE_ENERGY_COST = 10
+
+
+async def _get_or_create_interaction(
+    db: AsyncSession, user_id: int, ai_id: int,
+) -> Interaction:
+    """读取 (user_id, ai_id) 对应的 Interaction，不存在则创建。"""
+    result = await db.execute(
+        select(Interaction).where(
+            Interaction.user_id == user_id,
+            Interaction.ai_id == ai_id,
+        )
+    )
+    interaction = result.scalar_one_or_none()
+    if interaction is None:
+        interaction = Interaction(user_id=user_id, ai_id=ai_id)
+        db.add(interaction)
+        await db.flush()
+    return interaction
+
+
+@router.post("/{persona_id}/request-selfie")
+async def request_selfie(
+    persona_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """用户请求 AI 角色发一张自拍。消耗角色能量，返回生成的图片 URL 与反应文本。
+
+    流程：
+        1. 检查当前 (user, persona) 的 EmotionState.energy >= 10。
+        2. 获取当前情绪 + 激活服装。
+        3. 使用面部参考图生成 anime 风格自拍。
+        4. 创建 media_type="image" 的 ChatMessage。
+        5. 从 EmotionState 扣除能量并轻微提升愉悦。
+    """
+    # 加载角色
+    persona_res = await db.execute(
+        select(AIPersona).where(AIPersona.id == persona_id)
+    )
+    persona = persona_res.scalar_one_or_none()
+    if persona is None:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    # 加载情绪状态
+    emo_res = await db.execute(
+        select(EmotionState).where(
+            EmotionState.user_id == current_user.id,
+            EmotionState.ai_id == persona_id,
+        )
+    )
+    state = emo_res.scalar_one_or_none()
+    if state is None or state.energy is None or state.energy < _SELFIE_ENERGY_COST:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Persona is too tired to take a selfie (need >= {_SELFIE_ENERGY_COST} energy)",
+        )
+
+    # 补充当前情绪描述
+    if state.pleasure > 0.4:
+        mood_expression = "soft genuine smile, eyes bright, warm gaze"
+    elif state.pleasure < -0.2:
+        mood_expression = "thoughtful expression, quiet eyes, slight melancholy"
+    else:
+        mood_expression = "calm relaxed expression, soft natural look"
+
+    # 读取当前激活服装（可能为 None）
+    outfit_override = None
+    try:
+        from services.image_gen_service import get_active_outfit
+        outfit_override = await get_active_outfit(
+            db,
+            persona_id=persona.id,
+            emotion_state={
+                "pleasure": state.pleasure,
+                "activation": state.activation,
+                "energy": state.energy,
+            },
+        )
+    except Exception as exc:
+        logger.warning("Outfit lookup for selfie failed: %s", exc)
+
+    # 生成场景提示词（为“自拍”固化一些描述）
+    selfie_caption = (
+        f"casual selfie taken on phone, slight angle from above, "
+        f"{mood_expression}, soft natural lighting"
+    )
+    try:
+        img_prompt = await generate_image_prompt(
+            persona_prompt=persona.personality_prompt,
+            style_tags=persona.ins_style_tags,
+            caption=selfie_caption,
+            visual_description=getattr(persona, "visual_prompt_tags", None),
+            persona_name=persona.name,
+        )
+    except Exception as exc:
+        logger.warning("Selfie prompt generation failed: %s", exc)
+        img_prompt = selfie_caption
+
+    # 生成图片
+    media_url = ""
+    base_face_url = getattr(persona, "base_face_url", None)
+    try:
+        from services.image_gen_service import (
+            generate_image_with_face_ref,
+            generate_image,
+            download_to_static,
+        )
+        if base_face_url:
+            urls = await generate_image_with_face_ref(
+                prompt=img_prompt,
+                face_ref_url=base_face_url,
+                size="720*1280",
+                n=1,
+                persona_id=persona.id,
+                outfit_override=outfit_override,
+            )
+        else:
+            urls = await generate_image(
+                prompt=img_prompt,
+                n=1,
+                persona_id=persona.id,
+                outfit_override=outfit_override,
+            )
+        if urls:
+            media_url = await download_to_static(urls[0], prefix=f"selfie_{persona.id}")
+    except Exception as exc:
+        logger.exception("Selfie generation failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to generate selfie")
+
+    if not media_url:
+        raise HTTPException(status_code=500, detail="Selfie image unavailable")
+
+    # 生成 AI 反应文本
+    try:
+        reaction_text = await generate_proactive_dm(
+            persona_prompt=persona.personality_prompt,
+            system_instruction=(
+                "The user just asked for a selfie. Send a short in-character reply "
+                "(1–2 sentences) acknowledging the photo. Stay natural, no narration. "
+                "Reply ONLY with the message text."
+            ),
+            temperature=0.85,
+            max_tokens=120,
+        )
+    except Exception as exc:
+        logger.warning("Selfie reaction text failed: %s", exc)
+        reaction_text = "拍了一张给你。"
+
+    # 扣除能量，轻微提升愉悦
+    state.energy = max(0.0, state.energy - _SELFIE_ENERGY_COST)
+    state.pleasure = max(-1.0, min(1.0, state.pleasure + 0.03))
+
+    # 写入聊天消息（AI 贴出自拍）
+    chat_msg = ChatMessage(
+        user_id=current_user.id,
+        ai_id=persona_id,
+        role="assistant",
+        content=reaction_text,
+        message_type="chat",
+        media_type="image",
+        media_url=media_url,
+        event="selfie",
+        delivered=1,
+    )
+    db.add(chat_msg)
+    await db.commit()
+    await db.refresh(chat_msg)
+
+    return {
+        "message_id": chat_msg.id,
+        "media_url": media_url,
+        "reaction": reaction_text,
+        "energy_remaining": state.energy,
+    }
+
+
+class GiftSendResponse(BaseModel):
+    gift_id: int
+    gift_name: str
+    gems_spent: int
+    gems_remaining: int
+    energy_recovered: float
+    reaction: str
+    combo_count: int
+    combo_triggered: bool
+    scene_triggered: bool
+    message_id: int
+
+
+@router.post("/{persona_id}/send-gift-enhanced", response_model=GiftSendResponse)
+async def send_gift_enhanced(
+    persona_id: int,
+    gift_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """增强版送礼物：含 AI 在场反应 + 连击检测 + 特殊场景触发。
+
+    流程：
+        1. 验证用户钻石。
+        2. 扣费 + 写 GemTransaction。
+        3. 应用能量恢复到 AI 情绪状态。
+        4. 生成在场反应文本（优先用 gift.reaction_template）。
+        5. 连击：最近 5 分钟同口 gift、计数 >= combo_bonus_threshold/3，推送加能量奖励。
+        6. 若 gift.triggers_scene，尝试启动一个与 gift 同名场景。
+    """
+    # 加载角色 + 礼物
+    persona = (await db.execute(
+        select(AIPersona).where(AIPersona.id == persona_id)
+    )).scalar_one_or_none()
+    if persona is None:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    gift = (await db.execute(
+        select(VirtualGift).where(VirtualGift.id == gift_id, VirtualGift.is_active == 1)
+    )).scalar_one_or_none()
+    if gift is None:
+        raise HTTPException(status_code=404, detail="Gift not found or inactive")
+
+    # 检查钻石余额
+    if int(current_user.gem_balance or 0) < int(gift.gem_cost):
+        raise HTTPException(status_code=400, detail="Insufficient gem balance")
+
+    # 扣费
+    current_user.gem_balance = int(current_user.gem_balance or 0) - int(gift.gem_cost)
+    db.add(GemTransaction(
+        user_id=current_user.id,
+        amount=-int(gift.gem_cost),
+        balance_after=current_user.gem_balance,
+        tx_type="gift_send",
+        reference_id=f"gift_{gift.id}_persona_{persona.id}",
+        description=f"Sent gift '{gift.name}' to {persona.name}",
+    ))
+
+    # 应用能量恢复到 AI 情绪状态
+    state = (await db.execute(
+        select(EmotionState).where(
+            EmotionState.user_id == current_user.id,
+            EmotionState.ai_id == persona_id,
+        )
+    )).scalar_one_or_none()
+    if state is not None and gift.energy_recovery:
+        state.energy = min(100.0, float(state.energy or 0.0) + float(gift.energy_recovery))
+        state.pleasure = max(-1.0, min(1.0, float(state.pleasure or 0.0) + 0.05))
+
+    # 连击检测：最近 5 分钟同一 gift 计数（含本次）
+    from datetime import timedelta as _td
+    from datetime import datetime as _dt
+    cutoff = _dt.utcnow() - _td(minutes=5)
+    await db.flush()  # 确保本次 GemTransaction 被计入
+    combo_count_q = await db.execute(
+        select(func.count(GemTransaction.id)).where(
+            GemTransaction.user_id == current_user.id,
+            GemTransaction.tx_type == "gift_send",
+            GemTransaction.reference_id == f"gift_{gift.id}_persona_{persona.id}",
+            GemTransaction.created_at >= cutoff,
+        )
+    )
+    combo_count = int(combo_count_q.scalar() or 0)
+    combo_threshold = int(gift.combo_bonus_threshold or 3)
+    combo_triggered = combo_count >= combo_threshold
+
+    if combo_triggered and state is not None:
+        # 额外能量 + 愉悦奖励
+        state.energy = min(100.0, float(state.energy) + 5.0)
+        state.pleasure = max(-1.0, min(1.0, float(state.pleasure) + 0.1))
+
+    # 生成在场反应
+    base_directive = (
+        gift.reaction_template
+        or f"You just received a gift '{gift.name}' from this person. "
+        "React in-character with warmth and acknowledgement."
+    )
+    combo_directive = (
+        f"\nThey have sent you {combo_count} of '{gift.name}' in the last 5 minutes. "
+        "Reference this gentle combo / abundance in your reply."
+        if combo_triggered else ""
+    )
+    try:
+        reaction = await generate_proactive_dm(
+            persona_prompt=persona.personality_prompt,
+            system_instruction=(
+                f"{base_directive}{combo_directive}\n"
+                "Reply ONLY with the message text (1–2 sentences). Stay in character."
+            ),
+            temperature=0.85,
+            max_tokens=160,
+        )
+    except Exception as exc:
+        logger.warning("Gift reaction generation failed: %s", exc)
+        reaction = f"谢谢你的{gift.name}。"
+
+    # 写 ChatMessage
+    chat_msg = ChatMessage(
+        user_id=current_user.id,
+        ai_id=persona_id,
+        role="assistant",
+        content=reaction,
+        message_type="chat",
+        event=f"gift_{gift.id}",
+        delivered=1,
+    )
+    db.add(chat_msg)
+    await db.flush()
+
+    # 场景触发：查找同名场景并尝试启动
+    scene_triggered = False
+    if gift.triggers_scene:
+        try:
+            from models.chat_scene import ChatScene
+            scene_res = await db.execute(
+                select(ChatScene).where(
+                    ChatScene.persona_id == persona.id,
+                    ChatScene.scene_name == gift.name,
+                    ChatScene.is_active == True,  # noqa: E712
+                ).limit(1)
+            )
+            target_scene = scene_res.scalar_one_or_none()
+            if target_scene is not None:
+                try:
+                    await scene_service.start_scene(
+                        db=db,
+                        user_id=current_user.id,
+                        persona_id=persona.id,
+                        scene_id=target_scene.id,
+                    )
+                    scene_triggered = True
+                except ValueError as scene_exc:
+                    logger.info(
+                        "Gift scene start skipped: %s", scene_exc,
+                    )
+        except Exception as exc:
+            logger.warning("Gift scene trigger lookup failed: %s", exc)
+
+    await db.commit()
+    await db.refresh(chat_msg)
+
+    return GiftSendResponse(
+        gift_id=gift.id,
+        gift_name=gift.name,
+        gems_spent=int(gift.gem_cost),
+        gems_remaining=int(current_user.gem_balance),
+        energy_recovered=float(gift.energy_recovery or 0.0),
+        reaction=reaction,
+        combo_count=combo_count,
+        combo_triggered=combo_triggered,
+        scene_triggered=scene_triggered,
+        message_id=chat_msg.id,
+    )
+
+
+class RitualConfigBody(BaseModel):
+    morning_greeting: bool | None = None
+    morning_time: str | None = None
+    night_greeting: bool | None = None
+    night_time: str | None = None
+    mood_checkin: bool | None = None
+    shared_habit: str | None = None
+
+
+@router.post("/{persona_id}/configure-rituals")
+async def configure_rituals(
+    persona_id: int,
+    config: RitualConfigBody,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """配置用户与某角色的每日仪式偏好。
+
+    只会合并传入的字段，所以前端可以留。None 表示保持原值。时间需为 HH:MM。
+    """
+    # 验证角色存在
+    persona = (await db.execute(
+        select(AIPersona).where(AIPersona.id == persona_id)
+    )).scalar_one_or_none()
+    if persona is None:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    # 验证时间格式
+    for label, value in (("morning_time", config.morning_time), ("night_time", config.night_time)):
+        if value is not None and not _TIME_HHMM_RE.match(value):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid {label} format, expected HH:MM (00–23 : 00–59)",
+            )
+
+    interaction = await _get_or_create_interaction(db, current_user.id, persona_id)
+    existing = dict(interaction.ritual_config_json or {})
+    incoming = config.model_dump(exclude_unset=True, exclude_none=True)
+    existing.update(incoming)
+    interaction.ritual_config_json = existing
+
+    await db.commit()
+    return {
+        "persona_id": persona_id,
+        "ritual_config": existing,
+    }
+
+
+@router.get("/{persona_id}/streak")
+async def get_streak_info(
+    persona_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """获取当前 streak 信息与下一个里程碑。"""
+    persona = (await db.execute(
+        select(AIPersona).where(AIPersona.id == persona_id)
+    )).scalar_one_or_none()
+    if persona is None:
+        raise HTTPException(status_code=404, detail="Persona not found")
+
+    interaction = (await db.execute(
+        select(Interaction).where(
+            Interaction.user_id == current_user.id,
+            Interaction.ai_id == persona_id,
+        )
+    )).scalar_one_or_none()
+
+    current_streak = int(interaction.streak_count or 0) if interaction else 0
+    total_days = int(interaction.total_interaction_days or 0) if interaction else 0
+    last_streak_date = interaction.last_streak_date if interaction else None
+
+    sorted_milestones = sorted(_STREAK_MILESTONE_TABLE.keys())
+    next_milestone = next(
+        (m for m in sorted_milestones if m > current_streak),
+        None,
+    )
+    next_reward = _STREAK_MILESTONE_TABLE.get(next_milestone) if next_milestone else None
+
+    return {
+        "persona_id": persona_id,
+        "current_streak": current_streak,
+        "total_days": total_days,
+        "last_streak_date": last_streak_date,
+        "next_milestone": next_milestone,
+        "next_milestone_reward": next_reward,
+    }

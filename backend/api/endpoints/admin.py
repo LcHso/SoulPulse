@@ -42,7 +42,7 @@ POST   /api/admin/users/{user_id}/set-admin - 设置用户管理员权限
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -80,8 +80,7 @@ class PostOut(BaseModel):
     status: int
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class PendingPostsResponse(BaseModel):
@@ -155,8 +154,7 @@ class PersonaOut(BaseModel):
     avatar_url: str
     is_active: int
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UserOut(BaseModel):
@@ -180,8 +178,7 @@ class UserOut(BaseModel):
     is_admin: int
     created_at: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 # ── 辅助函数 ─────────────────────────────────────────────────

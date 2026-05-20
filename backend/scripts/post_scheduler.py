@@ -37,6 +37,8 @@ import asyncio
 import random
 from datetime import datetime, timezone, timedelta
 
+import pytz
+
 from sqlalchemy import select
 
 from core.database import async_session
@@ -53,7 +55,11 @@ from services.aliyun_ai_service import (
     generate_image_prompt,
     generate_story_video_prompt,
 )
-from services.image_gen_service import generate_image, generate_image_with_face_ref
+from services.image_gen_service import (
+    generate_image,
+    generate_image_with_face_ref,
+    get_active_outfit,
+)
 from services.video_gen_service import generate_video, generate_video_with_image_ref
 
 
@@ -96,6 +102,33 @@ def _aggregate_mood_hint(states: list[EmotionState]) -> str:
         parts.append("vibrant, full of life")  # 高能量：充满活力
 
     return ", ".join(parts) if parts else ""
+
+
+async def get_routine_context(persona, current_hour: int) -> str:
+    """获取角色在当前时间的作息活动（daily_routine_json），用于叠加到帖子生成提示词。
+
+    查找顺序：当前小时 -> 附近小时 (±1, ±2) -> 空字符串。
+    返回的活动描述会被帖子调度器作为 context 传入 LLM 生成。
+
+    Args:
+        persona: AIPersona 记录（需含 daily_routine_json 字段）。
+        current_hour: 角色本地时区的小时数（0-23）。
+
+    Returns:
+        str: 活动描述（如 “在录音棚调试新歌”），或空字符串。
+    """
+    routine = getattr(persona, "daily_routine_json", None) or {}
+    if not isinstance(routine, dict) or not routine:
+        return ""
+    activity = routine.get(str(current_hour)) or routine.get(int(current_hour))
+    if activity:
+        return str(activity)
+    for offset in (1, -1, 2, -2):
+        candidate_hour = (current_hour + offset) % 24
+        activity = routine.get(str(candidate_hour)) or routine.get(int(candidate_hour))
+        if activity:
+            return str(activity)
+    return ""
 
 
 async def _apply_energy_cost_to_states(
@@ -199,6 +232,52 @@ async def generate_new_post():
         emo_states = emo_result.scalars().all()
         mood_hint = _aggregate_mood_hint(emo_states)
 
+        # ── 聚合情绪均值，用于服装选择 ────────────────
+        emotion_state_avg: dict | None = None
+        if emo_states:
+            emotion_state_avg = {
+                "pleasure": sum(s.pleasure for s in emo_states) / len(emo_states),
+                "activation": sum(s.activation for s in emo_states) / len(emo_states),
+                "energy": sum(s.energy for s in emo_states) / len(emo_states),
+            }
+
+        # ── 选择当前服装/场景（世界事件 > 情绪规则 > 默认）──
+        outfit_override: dict | None = None
+        try:
+            outfit_override = await get_active_outfit(
+                db,
+                persona_id=persona.id,
+                emotion_state=emotion_state_avg,
+            )
+            if outfit_override:
+                tag_preview = (outfit_override.get("visual_prompt_override") or "")[:60]
+                print(f"[scheduler] Outfit selected for {persona.name}: {tag_preview}...")
+        except Exception as e:
+            print(f"[scheduler] Outfit selection failed: {e}")
+
+        # ── 当前作息活动 (Plan Task 6 每日生活模拟) ───────────────────────
+        routine_activity = ""
+        try:
+            tz = pytz.timezone(persona.timezone) if getattr(persona, "timezone", None) else pytz.UTC
+            local_hour = datetime.now(tz).hour
+        except Exception:
+            local_hour = datetime.utcnow().hour
+        try:
+            routine_activity = await get_routine_context(persona, local_hour)
+            if routine_activity:
+                print(
+                    f"[scheduler] Routine context for {persona.name} @ {local_hour}h: "
+                    f"{routine_activity[:60]}"
+                )
+        except Exception as e:
+            print(f"[scheduler] Routine context lookup failed: {e}")
+
+        # 将作息活动拼接到 mood_hint，让帖子反映“正在做什么”的真实感
+        composed_mood_hint = mood_hint
+        if routine_activity:
+            extra = f"right now you are: {routine_activity}"
+            composed_mood_hint = f"{mood_hint}; {extra}" if mood_hint else extra
+
         # 步骤1：生成帖子文案
         caption = ""
         try:
@@ -207,7 +286,7 @@ async def generate_new_post():
                 caption = await generate_text_only_caption(
                     persona_prompt=persona.personality_prompt,
                     style_tags=persona.ins_style_tags,
-                    mood_hint=mood_hint,
+                    mood_hint=composed_mood_hint,
                     timezone_str=persona.timezone,
                 )
             else:
@@ -215,7 +294,7 @@ async def generate_new_post():
                 caption = await generate_post_caption(
                     persona_prompt=persona.personality_prompt,
                     style_tags=persona.ins_style_tags,
-                    mood_hint=mood_hint,
+                    mood_hint=composed_mood_hint,
                     timezone_str=persona.timezone,
                 )
         except Exception as e:
@@ -235,16 +314,21 @@ async def generate_new_post():
                 )
                 print(f"[scheduler] Image prompt: {img_prompt[:80]}...")
 
-                # 步骤3：生成图片（随机尺寸）
+                # 步骤3：生成图片（随机尺寸 + 服装覆写）
                 base_face_url = getattr(persona, 'base_face_url', None)
                 if base_face_url:
                     print(f"[scheduler] Using face reference for {persona.name}")
                     urls = await generate_image_with_face_ref(
                         prompt=img_prompt, face_ref_url=base_face_url,
                         n=1, persona_id=persona.id,
+                        outfit_override=outfit_override,
                     )
                 else:
-                    urls = await generate_image(prompt=img_prompt, n=1)
+                    urls = await generate_image(
+                        prompt=img_prompt, n=1,
+                        persona_id=persona.id,
+                        outfit_override=outfit_override,
+                    )
                 media_url = urls[0] if urls else ""
                 print(f"[scheduler] Image generated: {media_url[:80]}...")
             except Exception as e:
