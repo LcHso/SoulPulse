@@ -29,7 +29,7 @@ android {
 
     defaultConfig {
         applicationId = "com.soulpulse.soulpulse"
-        minSdk = 21
+        minSdk = 23
         targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
