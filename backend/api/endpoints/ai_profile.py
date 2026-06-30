@@ -4,7 +4,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 import pytz
 
 from core.database import get_db
@@ -34,6 +34,9 @@ class AIPersonaBrief(BaseModel):
     gender_tag: str
     category: str
     archetype: str
+    persona_type: Optional[str] = None
+    feature_tier: Optional[str] = None
+    creator_user_id: Optional[int] = None
 
 
 class AIPersonaListOut(BaseModel):
@@ -146,14 +149,34 @@ def _generate_status_label(tz_name: str, profession: str) -> str:
 async def list_personas(
     category: Optional[str] = Query(None),
     q: Optional[str] = Query(None, description="Search by name, bio, or archetype"),
+    mine_only: Optional[bool] = Query(None, description="Only return personas created by the current user"),
     db: AsyncSession = Depends(get_db),
     current_user: Optional[User] = Depends(get_current_user_optional),
 ):
     """List all active AI personas, optionally filtered by category or search query.
     
     This endpoint is public and does not require authentication.
+    When ``mine_only=true`` and the caller is unauthenticated, an empty list is returned.
     """
+    if mine_only and current_user is None:
+        return AIPersonaListOut(personas=[], total=0)
+
     query = select(AIPersona).where(AIPersona.is_active == 1)
+    if mine_only and current_user is not None:
+        # Restrict strictly to personas the current user created/imported.
+        query = query.where(AIPersona.creator_user_id == current_user.id)
+    elif current_user is not None:
+        # Visibility filter: show globals (creator_user_id IS NULL) plus the
+        # current user's own private personas.
+        query = query.where(
+            or_(
+                AIPersona.creator_user_id.is_(None),
+                AIPersona.creator_user_id == current_user.id,
+            )
+        )
+    else:
+        # Anonymous callers see globals only.
+        query = query.where(AIPersona.creator_user_id.is_(None))
     if category:
         query = query.where(AIPersona.category == category)
     if q:
@@ -175,6 +198,9 @@ async def list_personas(
                 id=p.id, name=p.name, bio=p.bio, profession=p.profession,
                 avatar_url=p.avatar_url, gender_tag=p.gender_tag,
                 category=p.category, archetype=p.archetype,
+                persona_type=getattr(p, "persona_type", None),
+                feature_tier=getattr(p, "feature_tier", None),
+                creator_user_id=getattr(p, "creator_user_id", None),
             )
             for p in personas
         ],
@@ -194,6 +220,9 @@ async def get_ai_profile(
     result = await db.execute(select(AIPersona).where(AIPersona.id == ai_id))
     persona = result.scalar_one_or_none()
     if not persona:
+        raise HTTPException(status_code=404, detail="AI persona not found")
+    # Private personas are only accessible to their creator.
+    if persona.creator_user_id is not None and persona.creator_user_id != current_user.id:
         raise HTTPException(status_code=404, detail="AI persona not found")
 
     posts_result = await db.execute(
@@ -346,6 +375,9 @@ async def get_emotion_status(
         select(AIPersona).where(AIPersona.id == ai_id)
     )
     persona = persona_result.scalar_one_or_none()
+    # Private personas are only accessible to their creator.
+    if persona and persona.creator_user_id is not None and persona.creator_user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="AI persona not found")
     if persona:
         persona_timezone = persona.timezone or "Asia/Shanghai"
         try:
@@ -383,7 +415,13 @@ async def get_interactions_summary(
 
     ai_ids = [i.ai_id for i in interactions]
     personas_result = await db.execute(
-        select(AIPersona).where(AIPersona.id.in_(ai_ids))
+        select(AIPersona).where(
+            AIPersona.id.in_(ai_ids),
+            or_(
+                AIPersona.creator_user_id.is_(None),
+                AIPersona.creator_user_id == current_user.id,
+            ),
+        )
     )
     persona_map = {p.id: p for p in personas_result.scalars().all()}
 

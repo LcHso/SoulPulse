@@ -8,11 +8,13 @@ SoulPulse 数据库配置模块
 4. 初始化数据库表结构
 5. 执行数据库迁移
 
-使用异步 SQLAlchemy 配合 aiosqlite 驱动，
-支持高并发的异步数据库操作。
+支持双数据库引擎：
+- SQLite + aiosqlite：本地开发
+- PostgreSQL + asyncpg：生产环境
 
 数据库特性：
-- WAL 模式：提高并发读写性能
+- SQLite: WAL 模式提高并发性能
+- PostgreSQL: 连接池配置优化高并发
 - 自动迁移：检测并添加新列
 """
 
@@ -22,9 +24,36 @@ from sqlalchemy.orm import DeclarativeBase
 
 from core.config import settings
 
+
 # ── 创建异步数据库引擎 ──────────────────────────────────────────
-# echo=False 关闭 SQL 日志输出（生产环境）
-engine = create_async_engine(settings.DATABASE_URL, echo=False)
+def _create_engine():
+    """
+    根据 DATABASE_URL 前缀创建对应的异步引擎。
+    - PostgreSQL: 使用连接池配置（pool_size, max_overflow, pool_pre_ping, pool_recycle）
+    - SQLite: 使用 check_same_thread=False 允许多线程访问
+    """
+    db_url = settings.DATABASE_URL
+
+    if db_url.startswith("postgresql") or db_url.startswith("postgres"):
+        # PostgreSQL engine with connection pool settings
+        return create_async_engine(
+            db_url,
+            echo=False,
+            pool_size=20,
+            max_overflow=10,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+        )
+    else:
+        # SQLite engine with thread-safety arg
+        return create_async_engine(
+            db_url,
+            echo=False,
+            connect_args={"check_same_thread": False},
+        )
+
+
+engine = _create_engine()
 
 # 创建异步会话工厂
 # class_=AsyncSession: 指定使用异步会话

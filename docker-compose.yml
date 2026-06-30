@@ -1,9 +1,22 @@
-version: "3.8"
+# =============================================================================
+# SoulPulse - Local Development Stack
+# =============================================================================
+# Lightweight dev compose for running ONLY PostgreSQL in Docker, while the
+# backend / admin / frontend run natively on the developer's machine for
+# fast hot-reload.
+#
+# Run:
+#   docker compose up -d
+#
+# Connect from the host with:
+#   postgresql+asyncpg://soulpulse:soulpulse123@localhost:5432/soulpulse
+# =============================================================================
 
 services:
   postgres:
     image: postgres:16-alpine
     container_name: soulpulse-db
+    restart: unless-stopped
     environment:
       POSTGRES_USER: soulpulse
       POSTGRES_PASSWORD: soulpulse123
@@ -12,7 +25,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soulpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 volumes:
   pgdata:

@@ -39,6 +39,18 @@ def migrate():
         # BOOLEAN default FALSE = 0
         "ALTER TABLE virtual_gifts ADD COLUMN triggers_scene BOOLEAN NOT NULL DEFAULT 0",
         "ALTER TABLE virtual_gifts ADD COLUMN combo_bonus_threshold INTEGER",
+
+        # ── ai_personas ──────────────────────────────────────────────────────
+        # SillyTavern V2 character card JSON for import/export
+        "ALTER TABLE ai_personas ADD COLUMN tavern_card_json TEXT",
+        # creator_user_id: FK to users, nullable (NULL = global/official persona)
+        "ALTER TABLE ai_personas ADD COLUMN creator_user_id INTEGER REFERENCES users(id)",
+        "CREATE INDEX IF NOT EXISTS ix_ai_personas_creator_user_id ON ai_personas(creator_user_id)",
+        # persona_type / feature_tier / is_public for character classification & feature gating
+        "ALTER TABLE ai_personas ADD COLUMN persona_type VARCHAR(20) DEFAULT 'official'",
+        "CREATE INDEX IF NOT EXISTS ix_ai_personas_persona_type ON ai_personas(persona_type)",
+        "ALTER TABLE ai_personas ADD COLUMN feature_tier VARCHAR(20) DEFAULT 'full'",
+        "ALTER TABLE ai_personas ADD COLUMN is_public BOOLEAN DEFAULT 0",
     ]
 
     success = 0

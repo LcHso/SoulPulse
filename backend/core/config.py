@@ -58,8 +58,10 @@ class Settings(BaseModel):
 
     # ── 基础配置 ──────────────────────────────────────────
     APP_NAME: str = "SoulPulse"
-    # 数据库连接 URL，使用异步 SQLite
-    DATABASE_URL: str = "sqlite+aiosqlite:///./soulpulse.db"
+    # 数据库连接 URL
+    # SQLite (local dev): sqlite+aiosqlite:///./soulpulse.db
+    # PostgreSQL (production): postgresql+asyncpg://soulpulse:password@localhost:5432/soulpulse
+    DATABASE_URL: str = _env("DATABASE_URL", "sqlite+aiosqlite:///./soulpulse.db")
     # JWT 令牌签名密钥（生产环境必须修改）
     SECRET_KEY: str = _env("SECRET_KEY", "change-me-in-production-use-a-real-secret")
     # JWT 加密算法
@@ -80,6 +82,16 @@ class Settings(BaseModel):
     DASHSCOPE_VIDEO_MODEL: str = _env("DASHSCOPE_VIDEO_MODEL", "wanx-v1")
     # 文本嵌入模型：用于记忆向量化存储
     DASHSCOPE_EMBEDDING_MODEL: str = _env("DASHSCOPE_EMBEDDING_MODEL", "text-embedding-v3")
+
+    # ── NovelAI 配置（高质量动漫风格图片生成）──────────────────────────
+    # NovelAI API 密钥，用于访问 NovelAI 图片生成接口
+    NAI_API_KEY: str = _env("NAI_API_KEY", "")
+    # NovelAI 图片生成接口地址
+    NAI_API_URL: str = "https://image.novelai.net/ai/generate-image"
+    # NovelAI 模型版本，默认使用 NAI Diffusion Anime V3
+    NAI_MODEL: str = _env("NAI_MODEL", "nai-diffusion-3")
+    # 图片生成后端选择："nai"（NovelAI，主用）或 "dashscope"（阿里云 WANX，回退）
+    IMAGE_BACKEND: str = _env("IMAGE_BACKEND", "nai")
 
     # ── ChromaDB 配置（向量数据库，用于记忆存储）──────────────────────────
     CHROMA_DB_PATH: str = _env("CHROMA_DB_PATH", "./chroma_data")

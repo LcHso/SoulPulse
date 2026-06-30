@@ -1,11 +1,26 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/api/api_client.dart';
+import '../../shared/widgets/lazy_cached_image.dart';
 import 'gallery_models.dart';
 import 'gallery_service.dart';
+
+// ─── Providers ────────────────────────────────────────────────────────────────
+
+/// Provider for CG illustrations, keyed by persona ID
+final galleryProvider =
+    FutureProvider.family<List<CGIllustration>, int>((ref, personaId) async {
+  final service = GalleryService();
+  return service.getCGsForPersona(personaId);
+});
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
+enum _GalleryFilter { all, collected, locked }
 
 /// CG Gallery page showing all illustrations for a persona.
 ///
@@ -14,7 +29,7 @@ import 'gallery_service.dart';
 /// - Filter tabs: All | Collected | Locked
 /// - Collection counter ("已收集 3/15")
 /// - Tap collected CG for full-screen swipe viewer
-class GalleryPage extends StatefulWidget {
+class GalleryPage extends ConsumerStatefulWidget {
   final int personaId;
   final String personaName;
 
@@ -25,70 +40,33 @@ class GalleryPage extends StatefulWidget {
   });
 
   @override
-  State<GalleryPage> createState() => _GalleryPageState();
+  ConsumerState<GalleryPage> createState() => _GalleryPageState();
 }
 
-enum _GalleryFilter { all, collected, locked }
-
-class _GalleryPageState extends State<GalleryPage> {
-  final GalleryService _service = GalleryService();
-  List<CGIllustration> _allCGs = [];
-  bool _loading = true;
-  String? _error;
+class _GalleryPageState extends ConsumerState<GalleryPage> {
   _GalleryFilter _filter = _GalleryFilter.all;
 
-  @override
-  void initState() {
-    super.initState();
-    _loadCGs();
-  }
-
-  Future<void> _loadCGs() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final cgs = await _service.getCGsForPersona(widget.personaId);
-      if (mounted) {
-        setState(() {
-          _allCGs = cgs;
-          _loading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = e.toString();
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  List<CGIllustration> get _filteredCGs {
+  List<CGIllustration> _applyFilter(List<CGIllustration> allCGs) {
     switch (_filter) {
       case _GalleryFilter.collected:
-        return _allCGs.where((cg) => cg.isCollected).toList();
+        return allCGs.where((cg) => cg.isCollected).toList();
       case _GalleryFilter.locked:
-        return _allCGs.where((cg) => !cg.isCollected).toList();
+        return allCGs.where((cg) => !cg.isCollected).toList();
       case _GalleryFilter.all:
-        return _allCGs;
+        return allCGs;
     }
   }
 
-  int get _collectedCount => _allCGs.where((cg) => cg.isCollected).length;
-
-  void _openFullScreen(CGIllustration cg) {
+  void _openFullScreen(List<CGIllustration> allCGs, CGIllustration cg) {
     if (!cg.isCollected) return;
-    final collectedCGs = _allCGs.where((c) => c.isCollected).toList();
+    final collectedCGs = allCGs.where((c) => c.isCollected).toList();
     final initialIndex = collectedCGs.indexOf(cg);
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _FullScreenCGViewer(
           cgs: collectedCGs,
           initialIndex: initialIndex >= 0 ? initialIndex : 0,
-          service: _service,
+          service: GalleryService(),
         ),
       ),
     );
@@ -98,6 +76,7 @@ class _GalleryPageState extends State<GalleryPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final asyncCGs = ref.watch(galleryProvider(widget.personaId));
 
     return Scaffold(
       appBar: AppBar(
@@ -107,38 +86,44 @@ class _GalleryPageState extends State<GalleryPage> {
           onPressed: () => context.pop(),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.error_outline,
-                          size: 48, color: theme.colorScheme.error),
-                      const SizedBox(height: 12),
-                      Text(_error!, style: theme.textTheme.bodyMedium),
-                      const SizedBox(height: 16),
-                      FilledButton.icon(
-                        onPressed: _loadCGs,
-                        icon: const Icon(Icons.refresh, size: 18),
-                        label: const Text('重试'),
-                      ),
-                    ],
-                  ),
-                )
-              : Column(
-                  children: [
-                    // Counter + filter tabs
-                    _buildHeader(theme, isDark),
-                    // CG grid
-                    Expanded(child: _buildGrid(theme, isDark)),
-                  ],
-                ),
+      body: asyncCGs.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline,
+                  size: 48, color: theme.colorScheme.error),
+              const SizedBox(height: 12),
+              Text(error.toString(), style: theme.textTheme.bodyMedium),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () =>
+                    ref.invalidate(galleryProvider(widget.personaId)),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+        data: (allCGs) {
+          final filteredCGs = _applyFilter(allCGs);
+          final collectedCount =
+              allCGs.where((cg) => cg.isCollected).length;
+          return Column(
+            children: [
+              _buildHeader(allCGs, collectedCount, theme, isDark),
+              Expanded(
+                  child: _buildGrid(allCGs, filteredCGs, theme, isDark)),
+            ],
+          );
+        },
+      ),
     );
   }
 
-  Widget _buildHeader(ThemeData theme, bool isDark) {
+  Widget _buildHeader(List<CGIllustration> allCGs, int collectedCount,
+      ThemeData theme, bool isDark) {
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
       child: Column(
@@ -151,7 +136,7 @@ class _GalleryPageState extends State<GalleryPage> {
                   size: 18, color: theme.colorScheme.primary),
               const SizedBox(width: 6),
               Text(
-                '已收集 $_collectedCount/${_allCGs.length}',
+                '已收集 $collectedCount/${allCGs.length}',
                 style: theme.textTheme.titleSmall?.copyWith(
                   color: theme.colorScheme.primary,
                   fontWeight: FontWeight.w600,
@@ -229,8 +214,8 @@ class _GalleryPageState extends State<GalleryPage> {
     );
   }
 
-  Widget _buildGrid(ThemeData theme, bool isDark) {
-    final items = _filteredCGs;
+  Widget _buildGrid(List<CGIllustration> allCGs,
+      List<CGIllustration> items, ThemeData theme, bool isDark) {
     if (items.isEmpty) {
       return Center(
         child: Column(
@@ -262,15 +247,17 @@ class _GalleryPageState extends State<GalleryPage> {
         childAspectRatio: 0.75,
       ),
       itemCount: items.length,
-      itemBuilder: (context, index) => _buildCGCard(items[index], theme, isDark),
+      itemBuilder: (context, index) =>
+          _buildCGCard(allCGs, items[index], theme, isDark),
     );
   }
 
-  Widget _buildCGCard(CGIllustration cg, ThemeData theme, bool isDark) {
+  Widget _buildCGCard(List<CGIllustration> allCGs, CGIllustration cg,
+      ThemeData theme, bool isDark) {
     final imageUrl = ApiClient.proxyImageUrl(cg.thumbnailUrl ?? cg.imageUrl);
 
     return GestureDetector(
-      onTap: () => _openFullScreen(cg),
+      onTap: () => _openFullScreen(allCGs, cg),
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
@@ -288,17 +275,20 @@ class _GalleryPageState extends State<GalleryPage> {
             fit: StackFit.expand,
             children: [
               // Image
-              CachedNetworkImage(
+              LazyCachedImage(
                 imageUrl: imageUrl,
                 fit: BoxFit.cover,
-                placeholder: (_, __) => Container(
-                  color: isDark ? Colors.grey.shade800 : Colors.grey.shade200,
+                placeholder: (context) => Container(
+                  color:
+                      isDark ? Colors.grey.shade800 : Colors.grey.shade200,
                   child: const Center(
                       child: CircularProgressIndicator(strokeWidth: 2)),
                 ),
-                errorWidget: (_, __, ___) => Container(
-                  color: isDark ? Colors.grey.shade800 : Colors.grey.shade200,
-                  child: Icon(Icons.image, size: 40, color: Colors.grey.shade500),
+                errorWidget: (context, url, error) => Container(
+                  color:
+                      isDark ? Colors.grey.shade800 : Colors.grey.shade200,
+                  child: Icon(Icons.image,
+                      size: 40, color: Colors.grey.shade500),
                 ),
               ),
               // Blur overlay for locked CGs
@@ -357,7 +347,10 @@ class _GalleryPageState extends State<GalleryPage> {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Colors.black.withOpacity(0.7)],
+                      colors: [
+                        Colors.transparent,
+                        Colors.black.withOpacity(0.7)
+                      ],
                     ),
                   ),
                   child: Row(
@@ -374,7 +367,8 @@ class _GalleryPageState extends State<GalleryPage> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      _tierBadge(cg.qualityLabel, _tierColor(cg.qualityTier)),
+                      _tierBadge(
+                          cg.qualityLabel, _tierColor(cg.qualityTier)),
                     ],
                   ),
                 ),
@@ -481,9 +475,12 @@ class _FullScreenCGViewerState extends State<_FullScreenCGViewer> {
                       imageUrl: imageUrl,
                       fit: BoxFit.contain,
                       placeholder: (_, __) => const Center(
-                          child: CircularProgressIndicator(color: Colors.white54)),
+                          child: CircularProgressIndicator(
+                              color: Colors.white54)),
                       errorWidget: (_, __, ___) => const Icon(
-                          Icons.broken_image, color: Colors.white38, size: 64),
+                          Icons.broken_image,
+                          color: Colors.white38,
+                          size: 64),
                     ),
                   ),
                 );
@@ -501,7 +498,10 @@ class _FullScreenCGViewerState extends State<_FullScreenCGViewer> {
                     gradient: LinearGradient(
                       begin: Alignment.topCenter,
                       end: Alignment.bottomCenter,
-                      colors: [Colors.transparent, Colors.black.withOpacity(0.7)],
+                      colors: [
+                        Colors.transparent,
+                        Colors.black.withOpacity(0.7)
+                      ],
                     ),
                   ),
                   child: Column(
@@ -516,7 +516,8 @@ class _FullScreenCGViewerState extends State<_FullScreenCGViewer> {
                           fontWeight: FontWeight.bold,
                         ),
                       ),
-                      if (widget.cgs[_currentIndex].description != null) ...[
+                      if (widget.cgs[_currentIndex].description !=
+                          null) ...[
                         const SizedBox(height: 4),
                         Text(
                           widget.cgs[_currentIndex].description!,
@@ -542,11 +543,12 @@ class _FullScreenCGViewerState extends State<_FullScreenCGViewer> {
               child: IconButton(
                 icon: Container(
                   padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
+                  decoration: const BoxDecoration(
                     color: Colors.black45,
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(Icons.close, color: Colors.white, size: 22),
+                  child: const Icon(Icons.close,
+                      color: Colors.white, size: 22),
                 ),
                 onPressed: () => Navigator.of(context).pop(),
               ),

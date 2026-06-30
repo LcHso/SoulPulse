@@ -1,0 +1,103 @@
+# =============================================================================
+# SoulPulse - Base Docker Compose Definitions
+# =============================================================================
+# This file contains the SHARED service definitions that the production and
+# test stacks are derived from. It is NOT intended to be run directly.
+#
+# Docker Compose `extends` is intentionally avoided here (compatibility issues
+# with newer Compose versions). Instead, `docker-compose.prod.yml` and
+# `docker-compose.test.yml` are self-contained files that duplicate the
+# definitions below with environment-specific overrides.
+#
+# Treat this file as the "source of truth" for the canonical service shapes.
+# When changing a shared field (image versions, healthchecks, base volumes),
+# update this file first, then propagate to prod/test.
+#
+# Run individual stacks with:
+#   docker compose -f docker-compose.prod.yml -p soulpulse-prod up -d
+#   docker compose -f docker-compose.test.yml -p soulpulse-test up -d
+# =============================================================================
+
+x-backend-base: &backend-base
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD-SHELL", "curl -f http://localhost:8001/ || exit 1"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+
+x-scheduler-base: &scheduler-base
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  command: ["python3", "scripts/run_all_schedulers.py"]
+
+x-nginx-base: &nginx-base
+  image: nginx:1.25-alpine
+  restart: unless-stopped
+
+x-postgres-base: &postgres-base
+  image: postgres:16-alpine
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 (alpine) — primary relational database
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *postgres-base
+    environment:
+      POSTGRES_USER: soulpulse
+      POSTGRES_DB: soulpulse
+      POSTGRES_PASSWORD: changeme
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soulpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Backend API (FastAPI / uvicorn on port 8001 inside container)
+  # ---------------------------------------------------------------------------
+  backend:
+    <<: *backend-base
+    volumes:
+      - ./backend/static:/app/static
+      - ./data/chroma_data:/app/chroma_data
+
+  # ---------------------------------------------------------------------------
+  # Admin Backend (same image, runs uvicorn on port 8002)
+  # ---------------------------------------------------------------------------
+  admin-backend:
+    <<: *backend-base
+    command: ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Scheduler (cron-like background workers)
+  # ---------------------------------------------------------------------------
+  scheduler:
+    <<: *scheduler-base
+    volumes:
+      - ./backend/static:/app/static
+      - ./data/chroma_data:/app/chroma_data
+
+  # ---------------------------------------------------------------------------
+  # Nginx reverse proxy / static asset server
+  # ---------------------------------------------------------------------------
+  nginx:
+    <<: *nginx-base
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/build/web:/usr/share/nginx/html:ro
+      - ./admin-frontend/dist:/usr/share/nginx/admin-html:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro

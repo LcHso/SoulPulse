@@ -1,6 +1,13 @@
 """M3: Persona & Soul Lab endpoints"""
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+import os
+import re
+import time
+from pathlib import Path
+from typing import Optional
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +16,9 @@ from core.database import get_db
 from api.admin.dependencies import get_current_admin_user, _to_utc_iso
 
 router = APIRouter(tags=["admin-persona"])
+
+# 10 MB upload limit for character card files
+MAX_CARD_FILE_SIZE = 10 * 1024 * 1024
 
 
 class PersonaOut(BaseModel):
@@ -118,6 +128,198 @@ async def get_persona(
         avatar_url=p.avatar_url, is_active=p.is_active,
         personality_prompt=p.personality_prompt,
     )
+
+
+@router.post("/personas/import-card")
+async def import_persona_card(
+    file: UploadFile = File(...),
+    name_override: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db),
+    admin=Depends(get_current_admin_user),
+):
+    """
+    Import a SillyTavern character card (PNG or JSON) and create a global
+    AIPersona (creator_user_id = NULL).
+
+    - Accepts .png (with embedded card metadata) or .json card files.
+    - Rejects files > 10MB (413).
+    - When a PNG is uploaded, the image is also stored as the persona avatar
+      under /static/avatars/imported/.
+    - The created persona has creator_user_id = NULL (global / official).
+    """
+    from models.ai_persona import AIPersona
+    from services.character_card_service import (
+        character_card_service,
+        extract_card_from_png,
+    )
+    from services.content_moderation_service import ContentModerationService
+
+    moderation_service = ContentModerationService()
+
+    content = await file.read()
+
+    # ── File size check ──────────────────────────────────
+    if len(content) > MAX_CARD_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="File too large. Maximum allowed size is 10MB.",
+        )
+
+    # ── Determine file type ─────────────────────────────────
+    filename = (file.filename or "").lower()
+    content_type = (file.content_type or "").lower()
+
+    is_png = filename.endswith(".png") or content_type == "image/png"
+    is_json = filename.endswith(".json") or content_type in (
+        "application/json",
+        "text/json",
+    )
+
+    if not is_png and not is_json:
+        raise HTTPException(
+            status_code=400,
+            detail="Unsupported file type. Only .png and .json are accepted.",
+        )
+
+    # ── Parse card payload ─────────────────────────────────
+    card: Optional[dict] = None
+    if is_png:
+        card = extract_card_from_png(content)
+        if not card:
+            raise HTTPException(
+                status_code=400,
+                detail="PNG does not contain a valid embedded character card.",
+            )
+    else:
+        try:
+            card = json.loads(content.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise HTTPException(
+                status_code=400, detail="Invalid or unparseable JSON file."
+            )
+
+    if not isinstance(card, dict):
+        raise HTTPException(
+            status_code=400, detail="Malformed character card data."
+        )
+
+    # ── Validate required fields ─────────────────────────────────
+    data_section = card.get("data") if isinstance(card.get("data"), dict) else {}
+    card_name = (data_section.get("name") or card.get("name") or "").strip()
+    if not card_name:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Character card is missing required field: name.",
+        )
+
+    # ── Map to persona fields ─────────────────────────────────
+    persona_data = await character_card_service.import_card_to_persona_data(card)
+
+    if name_override and name_override.strip():
+        persona_data["name"] = name_override.strip()
+
+    # personality_prompt is required (NOT NULL); ensure a non-empty value
+    if not persona_data.get("personality_prompt"):
+        persona_data["personality_prompt"] = (
+            persona_data.get("bio") or persona_data["name"]
+        )
+
+    # ── Save PNG avatar (if applicable) ─────────────────────────────────
+    avatar_url = ""
+    if is_png:
+        backend_dir = Path(__file__).resolve().parent.parent.parent
+        avatar_dir = backend_dir / "static" / "avatars" / "imported"
+        os.makedirs(avatar_dir, exist_ok=True)
+
+        # Build a safe filename derived from the persona name + timestamp
+        safe_name = re.sub(r"[^\w\-]+", "_", persona_data["name"]).strip("_") or "card"
+        avatar_filename = f"{safe_name}_{int(time.time())}.png"
+        avatar_path = avatar_dir / avatar_filename
+        try:
+            with open(avatar_path, "wb") as f:
+                f.write(content)
+        except OSError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to save avatar: {e}"
+            )
+
+        avatar_url = f"/static/avatars/imported/{avatar_filename}"
+
+    # ── Build AIPersona instance ─────────────────────────────────
+    allowed_fields = {
+        "name",
+        "bio",
+        "personality_prompt",
+        "family_background",
+        "tavern_card_json",
+        "visual_prompt_tags",
+        "secret_layers_json",
+        "daily_routine_json",
+        "voice_config_json",
+        "category",
+    }
+    persona_kwargs = {
+        k: v for k, v in persona_data.items() if k in allowed_fields and v is not None
+    }
+    # Global persona: creator_user_id is NULL
+    persona_kwargs["creator_user_id"] = None
+    persona_kwargs["persona_type"] = "imported"
+    persona_kwargs["feature_tier"] = "full"
+    persona_kwargs["is_public"] = False
+    if avatar_url:
+        persona_kwargs["avatar_url"] = avatar_url
+
+    persona = AIPersona(**persona_kwargs)
+
+    db.add(persona)
+    try:
+        await db.commit()
+        await db.refresh(persona)
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create persona: {e}"
+        )
+
+    # ── Audit log for admin imports ─────────────────────────────────────────
+    # Admin-imported content is trusted (no rejection), but every import is
+    # recorded so reviewers can audit who imported what and when.
+    try:
+        await moderation_service.log_moderation(
+            db,
+            content_type="admin_card_import",
+            content_id=persona.id,
+            user_id=0,
+            ai_id=persona.id,
+            action="approved",
+            reason="admin_import",
+        )
+        await db.commit()
+    except Exception:
+        # Audit logging must never fail the admin import itself.
+        await db.rollback()
+
+    return {
+        "status": "created",
+        "message": "Character card imported and global persona created successfully.",
+        "persona": {
+            "id": persona.id,
+            "name": persona.name,
+            "bio": persona.bio,
+            "profession": persona.profession,
+            "gender_tag": persona.gender_tag,
+            "category": persona.category,
+            "archetype": persona.archetype,
+            "base_face_url": persona.base_face_url,
+            "visual_prompt_tags": persona.visual_prompt_tags,
+            "avatar_url": persona.avatar_url,
+            "is_active": persona.is_active,
+            "personality_prompt": persona.personality_prompt,
+            "family_background": persona.family_background,
+            "creator_user_id": persona.creator_user_id,
+            "tavern_card_json": persona.tavern_card_json,
+        },
+    }
 
 
 @router.put("/personas/{persona_id}")

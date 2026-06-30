@@ -17,8 +17,10 @@
 // ============================================================================
 
 import 'dart:convert';
+import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import '../services/app_monitor.dart';
 
 /// 未认证异常类
 ///
@@ -165,39 +167,59 @@ class ApiClient {
   static Future<Map<String, dynamic>> post(
       String path, Map<String, dynamic> body) async {
     // 发送 POST 请求，设置 15 秒超时
-    final response = await http
-        .post(Uri.parse('$baseUrl$path'),
-            headers: _headers, body: jsonEncode(body))
-        .timeout(const Duration(seconds: 15));
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await http
+          .post(Uri.parse('$baseUrl$path'),
+              headers: _headers, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 15));
 
-    _check401(response);
+      stopwatch.stop();
+      _trackApiCall('POST $path', stopwatch.elapsed);
 
-    // 处理错误响应
-    if (response.statusCode >= 400) {
-      final err = jsonDecode(response.body);
-      throw Exception(err['detail'] ?? 'Request failed');
+      _check401(response);
+
+      // 处理错误响应
+      if (response.statusCode >= 400) {
+        final err = jsonDecode(response.body);
+        throw Exception(err['detail'] ?? 'Request failed');
+      }
+
+      // 重写 URL 并返回响应数据
+      return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('POST $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    // 重写 URL 并返回响应数据
-    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   /// 发送 PUT 请求
   static Future<Map<String, dynamic>> put(
       String path, Map<String, dynamic> body) async {
-    final response = await http
-        .put(Uri.parse('$baseUrl$path'),
-            headers: _headers, body: jsonEncode(body))
-        .timeout(const Duration(seconds: 15));
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await http
+          .put(Uri.parse('$baseUrl$path'),
+              headers: _headers, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 15));
 
-    _check401(response);
+      stopwatch.stop();
+      _trackApiCall('PUT $path', stopwatch.elapsed);
 
-    if (response.statusCode >= 400) {
-      final err = jsonDecode(response.body);
-      throw Exception(err['detail'] ?? 'Request failed');
+      _check401(response);
+
+      if (response.statusCode >= 400) {
+        final err = jsonDecode(response.body);
+        throw Exception(err['detail'] ?? 'Request failed');
+      }
+
+      return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('PUT $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   /// 发送 PATCH 请求
@@ -210,19 +232,29 @@ class ApiClient {
   /// 返回更新后的资源数据
   static Future<Map<String, dynamic>> patch(
       String path, Map<String, dynamic> body) async {
-    final response = await http
-        .patch(Uri.parse('$baseUrl$path'),
-            headers: _headers, body: jsonEncode(body))
-        .timeout(const Duration(seconds: 15));
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await http
+          .patch(Uri.parse('$baseUrl$path'),
+              headers: _headers, body: jsonEncode(body))
+          .timeout(const Duration(seconds: 15));
 
-    _check401(response);
+      stopwatch.stop();
+      _trackApiCall('PATCH $path', stopwatch.elapsed);
 
-    if (response.statusCode >= 400) {
-      final err = jsonDecode(response.body);
-      throw Exception(err['detail'] ?? 'Request failed');
+      _check401(response);
+
+      if (response.statusCode >= 400) {
+        final err = jsonDecode(response.body);
+        throw Exception(err['detail'] ?? 'Request failed');
+      }
+
+      return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('PATCH $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   /// 发送 DELETE 请求
@@ -235,24 +267,34 @@ class ApiClient {
   /// 返回响应数据
   static Future<Map<String, dynamic>> delete(String path,
       [Map<String, dynamic>? body]) async {
-    // 构造 DELETE 请求
-    final request = http.Request('DELETE', Uri.parse('$baseUrl$path'));
-    request.headers.addAll(_headers);
-    if (body != null) request.body = jsonEncode(body);
+    final stopwatch = Stopwatch()..start();
+    try {
+      // 构造 DELETE 请求
+      final request = http.Request('DELETE', Uri.parse('$baseUrl$path'));
+      request.headers.addAll(_headers);
+      if (body != null) request.body = jsonEncode(body);
 
-    // 发送请求并等待响应
-    final streamed =
-        await http.Client().send(request).timeout(const Duration(seconds: 15));
-    final response = await http.Response.fromStream(streamed);
+      // 发送请求并等待响应
+      final streamed =
+          await http.Client().send(request).timeout(const Duration(seconds: 15));
+      final response = await http.Response.fromStream(streamed);
 
-    _check401(response);
+      stopwatch.stop();
+      _trackApiCall('DELETE $path', stopwatch.elapsed);
 
-    if (response.statusCode >= 400) {
-      final err = jsonDecode(response.body);
-      throw Exception(err['detail'] ?? 'Request failed');
+      _check401(response);
+
+      if (response.statusCode >= 400) {
+        final err = jsonDecode(response.body);
+        throw Exception(err['detail'] ?? 'Request failed');
+      }
+
+      return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('DELETE $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    return _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
   }
 
   /// 发送表单 POST 请求
@@ -265,23 +307,33 @@ class ApiClient {
   /// 返回响应数据
   static Future<Map<String, dynamic>> postForm(
       String path, Map<String, String> fields) async {
-    final response = await http
-        .post(
-          Uri.parse('$baseUrl$path'),
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          body: fields,
-        )
-        .timeout(const Duration(seconds: 15));
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await http
+          .post(
+            Uri.parse('$baseUrl$path'),
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: fields,
+          )
+          .timeout(const Duration(seconds: 15));
 
-    // NOTE: Do NOT call _check401 here. postForm is used for login,
-    // where 401 means "wrong credentials" — not an expired session.
-    // Let the status >= 400 handler parse the real error detail.
-    if (response.statusCode >= 400) {
-      final err = jsonDecode(response.body);
-      throw Exception(err['detail'] ?? 'Request failed');
+      stopwatch.stop();
+      _trackApiCall('POST_FORM $path', stopwatch.elapsed);
+
+      // NOTE: Do NOT call _check401 here. postForm is used for login,
+      // where 401 means "wrong credentials" — not an expired session.
+      // Let the status >= 400 handler parse the real error detail.
+      if (response.statusCode >= 400) {
+        final err = jsonDecode(response.body);
+        throw Exception(err['detail'] ?? 'Request failed');
+      }
+
+      return jsonDecode(response.body);
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('POST_FORM $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    return jsonDecode(response.body);
   }
 
   /// 发送 GET 请求并返回列表数据
@@ -307,22 +359,32 @@ class ApiClient {
     }
 
     // 发送 GET 请求
-    final response = await http
-        .get(Uri.parse('$baseUrl$path'), headers: _headers)
-        .timeout(const Duration(seconds: 15));
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await http
+          .get(Uri.parse('$baseUrl$path'), headers: _headers)
+          .timeout(const Duration(seconds: 15));
 
-    _check401(response);
+      stopwatch.stop();
+      _trackApiCall('GET $path', stopwatch.elapsed);
 
-    if (response.statusCode >= 400) {
-      throw Exception('Request failed');
+      _check401(response);
+
+      if (response.statusCode >= 400) {
+        throw Exception('Request failed');
+      }
+
+      // 解析响应并缓存
+      final data = _rewriteUrls(jsonDecode(response.body)) as List<dynamic>;
+      if (useCache) {
+        _cache[path] = _CacheEntry.list(data);
+      }
+      return data;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('GET $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    // 解析响应并缓存
-    final data = _rewriteUrls(jsonDecode(response.body)) as List<dynamic>;
-    if (useCache) {
-      _cache[path] = _CacheEntry.list(data);
-    }
-    return data;
   }
 
   /// 后台刷新列表缓存
@@ -424,22 +486,32 @@ class ApiClient {
       }
     }
 
-    final response = await http
-        .get(Uri.parse('$baseUrl$path'), headers: _headers)
-        .timeout(const Duration(seconds: 15));
+    final stopwatch = Stopwatch()..start();
+    try {
+      final response = await http
+          .get(Uri.parse('$baseUrl$path'), headers: _headers)
+          .timeout(const Duration(seconds: 15));
 
-    _check401(response);
+      stopwatch.stop();
+      _trackApiCall('GET $path', stopwatch.elapsed);
 
-    if (response.statusCode >= 400) {
-      throw Exception('Request failed');
+      _check401(response);
+
+      if (response.statusCode >= 400) {
+        throw Exception('Request failed');
+      }
+
+      final data =
+          _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
+      if (useCache) {
+        _cache[path] = _CacheEntry.map(data);
+      }
+      return data;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('GET $path', stopwatch.elapsed);
+      rethrow;
     }
-
-    final data =
-        _rewriteUrls(jsonDecode(response.body)) as Map<String, dynamic>;
-    if (useCache) {
-      _cache[path] = _CacheEntry.map(data);
-    }
-    return data;
   }
 
   /// 后台刷新 Map 缓存
@@ -470,6 +542,91 @@ class ApiClient {
       // 清除指定前缀的缓存条目
       _cache.removeWhere((key, _) => key.startsWith(pathPrefix));
     }
+  }
+
+  /// Internal: Track API call duration via AppMonitor.
+  static void _trackApiCall(String endpoint, Duration duration) {
+    AppMonitor.instance.recordApiCall(endpoint, duration);
+  }
+
+  /// 发送 multipart POST 请求（用于文件上传）
+  ///
+  /// 用于需要 multipart/form-data 的端点，如角色卡导入。
+  ///
+  /// [path] API 路径（如 '/character-cards/import'）
+  /// [fileBytes] 文件字节数据
+  /// [fileName] 文件名（包含扩展名）
+  /// [fileField] multipart 字段名，默认 'file'
+  /// [fields] 附加的表单字段键值对
+  /// [contentType] 文件的 MIME 类型（如 'image/png' / 'application/json'）
+  ///
+  /// 返回解析后的 JSON 响应数据
+  static Future<Map<String, dynamic>> postMultipart(
+    String path, {
+    required Uint8List fileBytes,
+    required String fileName,
+    String fileField = 'file',
+    Map<String, String> fields = const {},
+    String? contentType,
+  }) async {
+    final stopwatch = Stopwatch()..start();
+    try {
+      final uri = Uri.parse('$baseUrl$path');
+      final request = http.MultipartRequest('POST', uri);
+
+      // 仅添加 Authorization 头（Content-Type 由 MultipartRequest 自行设置）
+      if (_token != null) {
+        request.headers['Authorization'] = 'Bearer $_token';
+      }
+
+      // 附加表单字段
+      request.fields.addAll(fields);
+
+      // 解析 contentType 字符串为 MediaType 风格的 tuple（http 包内部使用）
+      final multipartFile = http.MultipartFile.fromBytes(
+        fileField,
+        fileBytes,
+        filename: fileName,
+        contentType: _parseMediaType(contentType),
+      );
+      request.files.add(multipartFile);
+
+      final streamed = await request.send().timeout(const Duration(seconds: 60));
+      final response = await http.Response.fromStream(streamed);
+
+      stopwatch.stop();
+      _trackApiCall('POST_MULTIPART $path', stopwatch.elapsed);
+
+      _check401(response);
+
+      if (response.statusCode >= 400) {
+        String detail = 'Upload failed';
+        try {
+          final err = jsonDecode(response.body);
+          if (err is Map && err['detail'] != null) {
+            detail = err['detail'].toString();
+          }
+        } catch (_) {}
+        throw Exception(detail);
+      }
+
+      final decoded = jsonDecode(response.body);
+      return _rewriteUrls(decoded) as Map<String, dynamic>;
+    } catch (e) {
+      stopwatch.stop();
+      _trackApiCall('POST_MULTIPART $path', stopwatch.elapsed);
+      rethrow;
+    }
+  }
+
+  /// 简易 MIME 解析（仅当显式提供时使用）
+  ///
+  /// http 包通过 MediaType 类型描述 contentType；为避免引入 http_parser 直接依赖，
+  /// 当前版本将其交由 http 包默认处理（传入 null）。
+  /// 如未来需要细粒度控制，可引入 package:http_parser/http_parser.dart 并替换此函数。
+  static dynamic _parseMediaType(String? contentType) {
+    // 返回 null 让 http 包根据文件名后缀推断；多数后端按字段名读取文件即可。
+    return null;
   }
 }
 

@@ -1,8 +1,30 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'streak_models.dart';
 import 'streak_service.dart';
+
+// ─── Providers ────────────────────────────────────────────────────────────────
+
+/// Combined streak data loaded from API
+class StreakData {
+  final StreakInfo streakInfo;
+  final RitualConfig ritualConfig;
+
+  const StreakData({required this.streakInfo, required this.ritualConfig});
+}
+
+/// Provider for streak + ritual data, keyed by persona ID
+final streakDataProvider =
+    FutureProvider.family<StreakData, int>((ref, personaId) async {
+  final service = StreakService();
+  final streak = await service.getStreakInfo(personaId);
+  final rituals = await service.getRitualConfig(personaId);
+  return StreakData(streakInfo: streak, ritualConfig: rituals);
+});
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 /// Streak & Daily Ritual configuration page.
 ///
@@ -12,7 +34,7 @@ import 'streak_service.dart';
 /// - Next milestone progress bar
 /// - Milestone reward preview
 /// - Ritual configuration toggles + time pickers
-class StreakPage extends StatefulWidget {
+class StreakPage extends ConsumerStatefulWidget {
   final int personaId;
   final String personaName;
 
@@ -23,41 +45,34 @@ class StreakPage extends StatefulWidget {
   });
 
   @override
-  State<StreakPage> createState() => _StreakPageState();
+  ConsumerState<StreakPage> createState() => _StreakPageState();
 }
 
-class _StreakPageState extends State<StreakPage> {
+class _StreakPageState extends ConsumerState<StreakPage> {
   final StreakService _service = StreakService();
-  StreakInfo? _streakInfo;
-  RitualConfig? _ritualConfig;
-  bool _loading = true;
   bool _saving = false;
   bool _ritualDirty = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _loadData();
-  }
+  // Local mutable copy of ritual config for form editing
+  RitualConfig? _editableConfig;
 
-  Future<void> _loadData() async {
-    setState(() => _loading = true);
-    final streak = await _service.getStreakInfo(widget.personaId);
-    final rituals = await _service.getRitualConfig(widget.personaId);
-    if (mounted) {
-      setState(() {
-        _streakInfo = streak;
-        _ritualConfig = rituals;
-        _loading = false;
-      });
-    }
+  /// Initialize local editable config from provider data
+  void _initEditableConfig(RitualConfig source) {
+    _editableConfig ??= RitualConfig(
+      morningGreeting: source.morningGreeting,
+      morningTime: source.morningTime,
+      nightGreeting: source.nightGreeting,
+      nightTime: source.nightTime,
+      moodCheckin: source.moodCheckin,
+      sharedHabit: source.sharedHabit,
+    );
   }
 
   Future<void> _saveRituals() async {
-    if (_ritualConfig == null || _saving) return;
+    if (_editableConfig == null || _saving) return;
     setState(() => _saving = true);
-    final success =
-        await _service.configureRituals(widget.personaId, _ritualConfig!);
+    final success = await _service.configureRituals(
+        widget.personaId, _editableConfig!);
     if (mounted) {
       setState(() => _saving = false);
       if (success) {
@@ -69,6 +84,7 @@ class _StreakPageState extends State<StreakPage> {
             duration: Duration(seconds: 1),
           ),
         );
+        ref.invalidate(streakDataProvider(widget.personaId));
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('保存失败，请稍后重试')),
@@ -78,9 +94,9 @@ class _StreakPageState extends State<StreakPage> {
   }
 
   Future<void> _pickTime(bool isMorning) async {
-    final current = isMorning
-        ? _ritualConfig!.morningTime
-        : _ritualConfig!.nightTime;
+    final config = _editableConfig!;
+    final current =
+        isMorning ? config.morningTime : config.nightTime;
     final parts = current.split(':');
     final initialTime = TimeOfDay(
       hour: int.tryParse(parts[0]) ?? (isMorning ? 8 : 22),
@@ -97,9 +113,9 @@ class _StreakPageState extends State<StreakPage> {
           '${picked.hour.toString().padLeft(2, '0')}:${picked.minute.toString().padLeft(2, '0')}';
       setState(() {
         if (isMorning) {
-          _ritualConfig!.morningTime = timeStr;
+          config.morningTime = timeStr;
         } else {
-          _ritualConfig!.nightTime = timeStr;
+          config.nightTime = timeStr;
         }
         _ritualDirty = true;
       });
@@ -110,6 +126,7 @@ class _StreakPageState extends State<StreakPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final asyncData = ref.watch(streakDataProvider(widget.personaId));
 
     return Scaffold(
       appBar: AppBar(
@@ -119,27 +136,49 @@ class _StreakPageState extends State<StreakPage> {
           onPressed: () => context.pop(),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  _buildStreakCard(theme, isDark),
-                  const SizedBox(height: 20),
-                  _buildMilestoneCard(theme, isDark),
-                  const SizedBox(height: 20),
-                  _buildRitualSection(theme, isDark),
-                ],
+      body: asyncData.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline,
+                  size: 48, color: theme.colorScheme.error),
+              const SizedBox(height: 12),
+              Text('加载失败', style: theme.textTheme.bodyMedium),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () =>
+                    ref.invalidate(streakDataProvider(widget.personaId)),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('重试'),
               ),
+            ],
+          ),
+        ),
+        data: (data) {
+          _initEditableConfig(data.ritualConfig);
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                _buildStreakCard(data.streakInfo, theme, isDark),
+                const SizedBox(height: 20),
+                _buildMilestoneCard(data.streakInfo, theme, isDark),
+                const SizedBox(height: 20),
+                _buildRitualSection(theme, isDark),
+              ],
             ),
+          );
+        },
+      ),
     );
   }
 
   // ─── Streak display ──────────────────────────────────────────
 
-  Widget _buildStreakCard(ThemeData theme, bool isDark) {
-    final streak = _streakInfo!;
+  Widget _buildStreakCard(
+      StreakInfo streak, ThemeData theme, bool isDark) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 20),
@@ -210,8 +249,8 @@ class _StreakPageState extends State<StreakPage> {
 
   // ─── Milestone progress ──────────────────────────────────────
 
-  Widget _buildMilestoneCard(ThemeData theme, bool isDark) {
-    final streak = _streakInfo!;
+  Widget _buildMilestoneCard(
+      StreakInfo streak, ThemeData theme, bool isDark) {
     final reward = streak.nextMilestoneReward;
     final gems = reward['gems'] as int? ?? 0;
     final intimacyBonus = reward['intimacy_bonus'] as int? ?? 0;
@@ -278,10 +317,11 @@ class _StreakPageState extends State<StreakPage> {
               spacing: 12,
               children: [
                 if (gems > 0)
-                  _rewardChip(Icons.diamond_outlined, '$gems 星钻', Colors.cyan),
-                if (intimacyBonus > 0)
                   _rewardChip(
-                      Icons.favorite_outline, '+$intimacyBonus 亲密度', Colors.pink),
+                      Icons.diamond_outlined, '$gems 星钻', Colors.cyan),
+                if (intimacyBonus > 0)
+                  _rewardChip(Icons.favorite_outline,
+                      '+$intimacyBonus 亲密度', Colors.pink),
               ],
             ),
           ],
@@ -304,7 +344,10 @@ class _StreakPageState extends State<StreakPage> {
           Icon(icon, size: 14, color: color),
           const SizedBox(width: 4),
           Text(label,
-              style: TextStyle(fontSize: 12, color: color, fontWeight: FontWeight.w500)),
+              style: TextStyle(
+                  fontSize: 12,
+                  color: color,
+                  fontWeight: FontWeight.w500)),
         ],
       ),
     );
@@ -313,7 +356,7 @@ class _StreakPageState extends State<StreakPage> {
   // ─── Ritual configuration ────────────────────────────────────
 
   Widget _buildRitualSection(ThemeData theme, bool isDark) {
-    final config = _ritualConfig!;
+    final config = _editableConfig!;
 
     return Container(
       width: double.infinity,
@@ -334,7 +377,8 @@ class _StreakPageState extends State<StreakPage> {
         children: [
           Row(
             children: [
-              Icon(Icons.auto_awesome, size: 20, color: theme.colorScheme.primary),
+              Icon(Icons.auto_awesome,
+                  size: 20, color: theme.colorScheme.primary),
               const SizedBox(width: 6),
               Text(
                 '每日仪式',
@@ -406,14 +450,15 @@ class _StreakPageState extends State<StreakPage> {
           ),
           const SizedBox(height: 8),
           TextField(
-            controller: TextEditingController(text: config.sharedHabit ?? ''),
+            controller:
+                TextEditingController(text: config.sharedHabit ?? ''),
             decoration: InputDecoration(
               hintText: '输入共同习惯...',
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
               ),
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 10),
             ),
             onChanged: (v) {
               config.sharedHabit = v.isEmpty ? null : v;
@@ -426,7 +471,8 @@ class _StreakPageState extends State<StreakPage> {
             width: double.infinity,
             height: 44,
             child: FilledButton(
-              onPressed: _ritualDirty && !_saving ? _saveRituals : null,
+              onPressed:
+                  _ritualDirty && !_saving ? _saveRituals : null,
               child: _saving
                   ? const SizedBox(
                       width: 20,
@@ -459,9 +505,10 @@ class _StreakPageState extends State<StreakPage> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: theme.textTheme.bodyMedium?.copyWith(
-                fontWeight: FontWeight.w500,
-              )),
+              Text(title,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w500,
+                  )),
               const SizedBox(height: 2),
               GestureDetector(
                 onTap: onTimeTap,

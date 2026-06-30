@@ -21,7 +21,7 @@ SoulPulse AI 角色模型
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Text, DateTime, JSON, ForeignKey, func
+from sqlalchemy import String, Integer, Text, DateTime, JSON, Boolean, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -97,6 +97,19 @@ class AIPersona(Base):
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     # 是否激活：0=禁用（软删除）, 1=激活，建立索引便于筛选
     is_active: Mapped[int] = mapped_column(Integer, default=1, index=True)
+    # 创建者用户 ID：可选外键，关联 users 表
+    # NULL 表示全局/官方角色（对所有用户可见），非 NULL 表示用户自定义角色
+    creator_user_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("users.id"), nullable=True, index=True,
+    )
+
+    # ── 角色类型与功能分级 ──────────────────────────────────────────
+    # 角色类型：official（官方）/ imported（用户导入）/ community（社区分享）
+    persona_type: Mapped[str] = mapped_column(String(20), default="official", index=True)
+    # 功能分级：full（情绪、主动 DM、图片生成）/ basic（仅文本对话 + 记忆）
+    feature_tier: Mapped[str] = mapped_column(String(20), default="full")
+    # 是否公开：用于未来社区分享，导入角色默认私有
+    is_public: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ── 语音合成配置（Voice Synthesis Config）─────────────────────
     # 角色专属的语音合成参数，示例：
@@ -122,6 +135,11 @@ class AIPersona(Base):
     character_arc_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("character_arcs.id"), nullable=True,
     )
+
+    # ── SillyTavern 兼容性字段 ──────────────────────────────────────────
+    # SillyTavern V2 角色卡 JSON 字符串，用于导入/导出标准格式角色卡
+    # 规范: https://github.com/malfoyslastname/character-card-spec-v2
+    tavern_card_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # ── 时间戳字段 ──────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

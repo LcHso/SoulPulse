@@ -1,0 +1,161 @@
+# =============================================================================
+# SoulPulse - Test / Staging Stack
+# =============================================================================
+# Self-contained test compose file. Run with:
+#   docker compose -f docker-compose.test.yml -p soulpulse-test up -d
+#
+# This stack is designed to run ALONGSIDE production on the same host with
+# full network and volume isolation:
+#   - Dedicated network: soulpulse-test-net
+#   - Dedicated data volumes under ./data-test/
+#   - Nginx exposed on host port 9080 (vs prod's 80)
+#
+# Required env vars (or use defaults):
+#   PG_PASSWORD_TEST - PostgreSQL password for the test soulpulse user
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL 16 (test instance, isolated data dir)
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: soulpulse-test-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: soulpulse_test
+      POSTGRES_USER: soulpulse
+      POSTGRES_PASSWORD: ${PG_PASSWORD_TEST:-soulpulse_test_2024}
+    volumes:
+      - ./data-test/postgres:/var/lib/postgresql/data
+    networks:
+      - soulpulse-test-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soulpulse"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Backend API (port 8001 inside container, NOT exposed to host)
+  # ---------------------------------------------------------------------------
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soulpulse-test-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env.test
+    environment:
+      DATABASE_URL: postgresql+asyncpg://soulpulse:${PG_PASSWORD_TEST:-soulpulse_test_2024}@postgres:5432/soulpulse_test
+    volumes:
+      - ./backend/static:/app/static
+      - ./data-test/chroma_data:/app/chroma_data
+    networks:
+      - soulpulse-test-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ---------------------------------------------------------------------------
+  # Admin Backend (port 8002, NOT exposed to host)
+  # ---------------------------------------------------------------------------
+  admin-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soulpulse-test-admin
+    restart: unless-stopped
+    command: ["python3", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]
+    env_file:
+      - ./backend/.env.test
+    environment:
+      DATABASE_URL: postgresql+asyncpg://soulpulse:${PG_PASSWORD_TEST:-soulpulse_test_2024}@postgres:5432/soulpulse_test
+    volumes:
+      - ./backend/static:/app/static
+      - ./data-test/chroma_data:/app/chroma_data
+    networks:
+      - soulpulse-test-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ---------------------------------------------------------------------------
+  # Scheduler (background workers)
+  # ---------------------------------------------------------------------------
+  scheduler:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: soulpulse-test-scheduler
+    restart: unless-stopped
+    command: ["python3", "scripts/run_all_schedulers.py"]
+    env_file:
+      - ./backend/.env.test
+    environment:
+      DATABASE_URL: postgresql+asyncpg://soulpulse:${PG_PASSWORD_TEST:-soulpulse_test_2024}@postgres:5432/soulpulse_test
+    volumes:
+      - ./backend/static:/app/static
+      - ./data-test/chroma_data:/app/chroma_data
+    networks:
+      - soulpulse-test-net
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ---------------------------------------------------------------------------
+  # Nginx (test instance — exposes host port 9080 to avoid prod conflict)
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: soulpulse-test-nginx
+    restart: unless-stopped
+    ports:
+      - "9080:80"
+    volumes:
+      - ./nginx/conf.d/soulpulse-test.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend/build/web:/usr/share/nginx/html:ro
+      - ./admin-frontend/dist:/usr/share/nginx/admin-html:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    networks:
+      - soulpulse-test-net
+    depends_on:
+      - backend
+      - admin-backend
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+networks:
+  soulpulse-test-net:
+    driver: bridge

@@ -100,6 +100,23 @@ _COOLDOWNS: dict[str, int] = {
     "streak_milestone": 86400,    # 连续里程碑奖励：24小时冷却
 }
 
+# 仅限 "full" feature_tier 角色的触发器（导入的基础角色无法支持这些行为）
+# - 图像依赖型：moody_story / enthusiastic_post 需要 base_face_url + 图像生成
+# - 转化型：conversion_* 依赖商业化叙事上下文（抽卡/订阅）
+FULL_TIER_ONLY_TRIGGERS: set[str] = {
+    "moody_story",
+    "enthusiastic_post",
+    "conversion_longing_reunion",
+    "conversion_intimacy_milestone",
+    "conversion_post_support",
+}
+
+# 需要面部参考图（base_face_url）的图像依赖触发器
+_IMAGE_DEPENDENT_TRIGGERS: set[str] = {
+    "moody_story",
+    "enthusiastic_post",
+}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 冷却时间辅助函数
@@ -1511,6 +1528,23 @@ async def run_emotion_scan():
 
             # 3f. 执行触发的行为
             for trigger in triggers:
+                # Feature tier 门控：basic 角色跳过仅限 full 的触发器
+                feature_tier = getattr(persona, "feature_tier", "full") or "full"
+                if feature_tier == "basic" and trigger in FULL_TIER_ONLY_TRIGGERS:
+                    print(
+                        f"[emotion-sched] Skipping {trigger} for {persona.name} "
+                        f"(feature_tier={feature_tier})"
+                    )
+                    continue
+
+                # 图像依赖触发器：缺少面部参考图则跳过（任何 tier 都适用）
+                if trigger in _IMAGE_DEPENDENT_TRIGGERS and not getattr(persona, "base_face_url", None):
+                    print(
+                        f"[emotion-sched] Skipping {trigger} for {persona.name} "
+                        f"(missing base_face_url)"
+                    )
+                    continue
+
                 # 检查冷却时间
                 if await _check_cooldown(db, state.user_id, state.ai_id, trigger):
                     continue  # 仍在冷却期，跳过

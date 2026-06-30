@@ -34,13 +34,16 @@
 """
 
 import asyncio
+import os
 import random
+import time
 from datetime import datetime, timezone, timedelta
 
 import pytz
 
 from sqlalchemy import select
 
+from core.config import settings
 from core.database import async_session
 from models.ai_persona import AIPersona
 from models.post import Post
@@ -59,7 +62,9 @@ from services.image_gen_service import (
     generate_image,
     generate_image_with_face_ref,
     get_active_outfit,
+    generate_post_image_unified,
 )
+from services.nai_image_service import nai_service
 from services.video_gen_service import generate_video, generate_video_with_image_ref
 
 
@@ -314,23 +319,58 @@ async def generate_new_post():
                 )
                 print(f"[scheduler] Image prompt: {img_prompt[:80]}...")
 
-                # 步骤3：生成图片（随机尺寸 + 服装覆写）
-                base_face_url = getattr(persona, 'base_face_url', None)
-                if base_face_url:
-                    print(f"[scheduler] Using face reference for {persona.name}")
-                    urls = await generate_image_with_face_ref(
-                        prompt=img_prompt, face_ref_url=base_face_url,
-                        n=1, persona_id=persona.id,
-                        outfit_override=outfit_override,
-                    )
+                # 步骤3：根据 IMAGE_BACKEND 路由图片生成
+                if settings.IMAGE_BACKEND == "nai":
+                    # Use NovelAI for high-quality anime image generation
+                    character_tags = persona.visual_prompt_tags or ""
+                    try:
+                        media_url = await generate_post_image_unified(
+                            visual_prompt_tags=character_tags,
+                            scenario_tags=img_prompt,
+                            orientation=random.choice(["portrait", "square", "landscape"]),
+                            persona_id=persona.id,
+                        )
+                    except Exception as nai_err:
+                        print(f"[scheduler] NAI post image failed: {nai_err}, falling back to DashScope")
+                        media_url = ""
+
+                    # If NAI returned nothing, fall back to DashScope
+                    if not media_url:
+                        print("[scheduler] NAI returned no image, falling back to DashScope")
+                        base_face_url = getattr(persona, 'base_face_url', None)
+                        if base_face_url:
+                            urls = await generate_image_with_face_ref(
+                                prompt=img_prompt, face_ref_url=base_face_url,
+                                n=1, persona_id=persona.id,
+                                outfit_override=outfit_override,
+                            )
+                        else:
+                            urls = await generate_image(
+                                prompt=img_prompt, n=1,
+                                persona_id=persona.id,
+                                outfit_override=outfit_override,
+                            )
+                        media_url = urls[0] if urls else ""
                 else:
-                    urls = await generate_image(
-                        prompt=img_prompt, n=1,
-                        persona_id=persona.id,
-                        outfit_override=outfit_override,
-                    )
-                media_url = urls[0] if urls else ""
-                print(f"[scheduler] Image generated: {media_url[:80]}...")
+                    # DashScope backend (original behavior)
+                    base_face_url = getattr(persona, 'base_face_url', None)
+                    if base_face_url:
+                        print(f"[scheduler] Using face reference for {persona.name}")
+                        urls = await generate_image_with_face_ref(
+                            prompt=img_prompt, face_ref_url=base_face_url,
+                            n=1, persona_id=persona.id,
+                            outfit_override=outfit_override,
+                        )
+                    else:
+                        urls = await generate_image(
+                            prompt=img_prompt, n=1,
+                            persona_id=persona.id,
+                            outfit_override=outfit_override,
+                        )
+                    media_url = urls[0] if urls else ""
+
+                if media_url:
+                    print(f"[scheduler] Image generated: {media_url[:80]}...")
             except Exception as e:
                 print(f"[scheduler] Image generation failed: {e}")
 

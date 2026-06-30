@@ -26,6 +26,9 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/auth_provider.dart';
+import '../../shared/widgets/deferred_widget.dart';
+
+// === Immediate imports (critical path - always loaded) ===
 import '../../features/shell/app_shell.dart';
 import '../../features/auth/login_page.dart';
 import '../../features/onboarding/onboarding_page.dart';
@@ -34,18 +37,23 @@ import '../../features/discover/discover_page.dart';
 import '../../features/chat/chat_list_page.dart';
 import '../../features/chat/chat_page.dart';
 import '../../features/profile/user_profile_page.dart';
-import '../../features/profile/settings_page.dart';
 import '../../features/profile/ai_profile_page.dart';
 import '../../features/profile/post_detail_page.dart';
 import '../../features/feed/story_player_page.dart';
-import '../../features/legal/legal_pages.dart';
-import '../../features/notifications/notification_page.dart';
-import '../../features/admin/admin_shell.dart';
-import '../../features/gallery/gallery_page.dart';
-import '../../features/outfits/outfits_page.dart';
-import '../../features/streak/streak_page.dart';
-import '../../features/subscription/subscription_page.dart';
-import '../../features/scenes/scenes_page.dart';
+
+// === Deferred imports (code-split chunks loaded on demand) ===
+import '../../features/profile/settings_page.dart' deferred as settings;
+import '../../features/legal/legal_pages.dart' deferred as legal;
+import '../../features/notifications/notification_page.dart' deferred as notifications;
+import '../../features/admin/admin_shell.dart' deferred as admin;
+import '../../features/gallery/gallery_page.dart' deferred as gallery;
+import '../../features/outfits/outfits_page.dart' deferred as outfits;
+import '../../features/streak/streak_page.dart' deferred as streak;
+import '../../features/subscription/subscription_page.dart' deferred as subscription;
+import '../../features/scenes/scenes_page.dart' deferred as scenes;
+import '../../features/profile/debug_monitor_page.dart' deferred as debug_monitor;
+import '../../features/persona_features/import_character_page.dart' deferred as import_character;
+import '../../features/my_characters/my_characters_page.dart' deferred as my_characters;
 
 /// 根导航器的 GlobalKey
 ///
@@ -162,7 +170,20 @@ final routerProvider = Provider<GoRouter>((ref) {
             ],
           ),
 
-          // 用户个人页面分支（底部导航第四项）
+          // 我的角色页面分支（底部导航第四项）
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: '/my-characters',
+                builder: (context, state) => DeferredWidget(
+                  libraryLoader: my_characters.loadLibrary,
+                  builder: (_) => my_characters.MyCharactersPage(),
+                ),
+              ),
+            ],
+          ),
+
+          // 用户个人页面分支（底部导航第五项）
           StatefulShellBranch(
             routes: [
               GoRoute(
@@ -256,61 +277,99 @@ final routerProvider = Provider<GoRouter>((ref) {
         },
       ),
 
-      /// CG Gallery page route
+      /// CG Gallery page route (deferred)
       GoRoute(
         path: '/gallery/:personaId',
         parentNavigatorKey: _rootNavigatorKey,
         builder: (context, state) {
           final personaId = int.parse(state.pathParameters['personaId']!);
           final name = state.uri.queryParameters['name'] ?? 'AI';
-          return GalleryPage(personaId: personaId, personaName: name);
+          return DeferredWidget(
+            libraryLoader: gallery.loadLibrary,
+            builder: (_) => gallery.GalleryPage(personaId: personaId, personaName: name),
+          );
         },
       ),
 
-      /// Outfits page route
+      /// Outfits page route (deferred)
       GoRoute(
         path: '/outfits/:personaId',
         parentNavigatorKey: _rootNavigatorKey,
         builder: (context, state) {
           final personaId = int.parse(state.pathParameters['personaId']!);
           final name = state.uri.queryParameters['name'] ?? 'AI';
-          return OutfitsPage(personaId: personaId, personaName: name);
+          return DeferredWidget(
+            libraryLoader: outfits.loadLibrary,
+            builder: (_) => outfits.OutfitsPage(personaId: personaId, personaName: name),
+          );
         },
       ),
 
-      /// Streak & Ritual page route
+      /// Streak & Ritual page route (deferred)
       GoRoute(
         path: '/streak/:personaId',
         parentNavigatorKey: _rootNavigatorKey,
         builder: (context, state) {
           final personaId = int.parse(state.pathParameters['personaId']!);
           final name = state.uri.queryParameters['name'] ?? 'AI';
-          return StreakPage(personaId: personaId, personaName: name);
+          return DeferredWidget(
+            libraryLoader: streak.loadLibrary,
+            builder: (_) => streak.StreakPage(personaId: personaId, personaName: name),
+          );
         },
       ),
 
-      /// Subscription page route
+      /// Subscription page route (deferred)
       GoRoute(
         path: '/subscription',
         parentNavigatorKey: _rootNavigatorKey,
-        builder: (context, state) => const SubscriptionPage(),
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: subscription.loadLibrary,
+          builder: (_) => subscription.SubscriptionPage(),
+        ),
       ),
 
-      /// 设置页面路由
+      /// Character card import page (deferred)
+      GoRoute(
+        path: '/import-character',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: import_character.loadLibrary,
+          builder: (_) => import_character.ImportCharacterPage(),
+        ),
+      ),
+
+      /// 设置页面路由 (deferred)
       GoRoute(
         path: '/settings',
         parentNavigatorKey: _rootNavigatorKey,
-        builder: (context, state) => const SettingsPage(),
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: settings.loadLibrary,
+          builder: (_) => settings.SettingsPage(),
+        ),
       ),
 
-      /// 通知页面路由
+      /// Debug monitor page (deferred, dev/admin only)
+      GoRoute(
+        path: '/debug-monitor',
+        parentNavigatorKey: _rootNavigatorKey,
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: debug_monitor.loadLibrary,
+          builder: (_) => debug_monitor.DebugMonitorPage(),
+        ),
+      ),
+
+      /// 通知页面路由 (deferred)
       GoRoute(
         path: '/notifications',
         parentNavigatorKey: _rootNavigatorKey,
-        builder: (context, state) => const NotificationPage(),
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: notifications.loadLibrary,
+          builder: (_) => notifications.NotificationPage(),
+        ),
       ),
 
-      /// 场景列表页面路由
+      /// 场景列表页面路由 (deferred)
       ///
       /// 显示指定 AI 的所有可用场景
       ///
@@ -325,32 +384,41 @@ final routerProvider = Provider<GoRouter>((ref) {
         builder: (context, state) {
           final personaId = int.parse(state.pathParameters['personaId']!);
           final personaName = state.uri.queryParameters['name'] ?? 'AI';
-          return ScenesPage(
-            personaId: personaId,
-            personaName: personaName,
+          return DeferredWidget(
+            libraryLoader: scenes.loadLibrary,
+            builder: (_) => scenes.ScenesPage(
+              personaId: personaId,
+              personaName: personaName,
+            ),
           );
         },
       ),
 
       // ================== 法律条款页面 ==================
 
-      /// 隐私政策页面路由
+      /// 隐私政策页面路由 (deferred)
       GoRoute(
         path: '/privacy',
         parentNavigatorKey: _rootNavigatorKey,
-        builder: (context, state) => const PrivacyPolicyPage(),
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: legal.loadLibrary,
+          builder: (_) => legal.PrivacyPolicyPage(),
+        ),
       ),
 
-      /// 服务条款页面路由
+      /// 服务条款页面路由 (deferred)
       GoRoute(
         path: '/terms',
         parentNavigatorKey: _rootNavigatorKey,
-        builder: (context, state) => const TermsOfServicePage(),
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: legal.loadLibrary,
+          builder: (_) => legal.TermsOfServicePage(),
+        ),
       ),
 
       // ================== 管理员后台路由 ==================
 
-      /// 管理员后台首页路由
+      /// 管理员后台首页路由 (deferred)
       ///
       /// 包含权限重定向：非管理员用户重定向到信息流页面
       GoRoute(
@@ -362,7 +430,10 @@ final routerProvider = Provider<GoRouter>((ref) {
           if (!isAdmin) return '/feed';
           return null;
         },
-        builder: (context, state) => const AdminShell(),
+        builder: (context, state) => DeferredWidget(
+          libraryLoader: admin.loadLibrary,
+          builder: (_) => admin.AdminShell(),
+        ),
       ),
     ],
   );

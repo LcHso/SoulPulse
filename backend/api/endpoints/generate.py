@@ -3,6 +3,10 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+import os
+import time
+
+from core.config import settings
 from core.database import get_db
 from core.security import get_current_user
 from models.user import User
@@ -10,6 +14,7 @@ from models.post import Post
 from models.ai_persona import AIPersona
 from services.aliyun_ai_service import generate_post_caption, generate_image_prompt
 from services.image_gen_service import generate_image, generate_image_with_face_ref
+from services.nai_image_service import nai_service
 from services.video_gen_service import generate_video, generate_video_with_image_ref
 
 router = APIRouter(prefix="/api/generate", tags=["generate"])
@@ -72,14 +77,44 @@ async def generate_post(
 
     if body.media_type == "image" or not media_url:
         try:
-            if base_face_url:
-                urls = await generate_image_with_face_ref(
-                    prompt=img_prompt, face_ref_url=base_face_url,
-                    size="720*1280", n=1, persona_id=persona.id,
+            if settings.IMAGE_BACKEND == "nai":
+                # Use NovelAI for high-quality anime image generation.
+                # NAI uses Danbooru-style tags; visual_prompt_tags should already be tag-formatted.
+                character_tags = persona.visual_prompt_tags or ""
+                image_bytes = await nai_service.generate_post_image(
+                    character_tags=character_tags,
+                    scenario_tags=img_prompt,
+                    orientation="portrait",
+                    seed=int(time.time()) % 2**32,
                 )
+                if image_bytes:
+                    filename = f"post_{persona.id}_{int(time.time())}.png"
+                    static_dir = os.path.join(
+                        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+                        "static",
+                        "posts",
+                    )
+                    filepath = os.path.join(static_dir, filename)
+                    media_url = await nai_service.save_image(image_bytes, filepath)
+                else:
+                    print("[generate] NAI image gen returned no bytes; falling back to DashScope")
+                    if base_face_url:
+                        urls = await generate_image_with_face_ref(
+                            prompt=img_prompt, face_ref_url=base_face_url,
+                            size="720*1280", n=1, persona_id=persona.id,
+                        )
+                    else:
+                        urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
+                    media_url = urls[0] if urls else ""
             else:
-                urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
-            media_url = urls[0] if urls else ""
+                if base_face_url:
+                    urls = await generate_image_with_face_ref(
+                        prompt=img_prompt, face_ref_url=base_face_url,
+                        size="720*1280", n=1, persona_id=persona.id,
+                    )
+                else:
+                    urls = await generate_image(prompt=img_prompt, size="720*1280", n=1)
+                media_url = urls[0] if urls else ""
         except Exception as e:
             print(f"[generate] Image gen failed: {e}")
             media_url = ""

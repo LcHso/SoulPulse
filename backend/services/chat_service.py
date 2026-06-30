@@ -737,6 +737,11 @@ async def handle_user_message(
     if not persona:
         raise ValueError(f"AI persona {ai_id} not found")
 
+    # Visibility check: private personas (creator_user_id != NULL) can only be
+    # used by their creator. Global personas (NULL) are accessible to everyone.
+    if persona.creator_user_id is not None and persona.creator_user_id != user.id:
+        raise ValueError(f"AI persona {ai_id} not found")
+
     # ── 步骤 2: 获取或创建交互记录 ──────────────────────────
     interaction_result = await db.execute(
         select(Interaction).where(
@@ -1009,6 +1014,11 @@ async def handle_media_message(
     )
     persona = persona_result.scalar_one_or_none()
     if not persona:
+        raise ValueError(f"AI persona {ai_id} not found")
+
+    # Visibility check: private personas (creator_user_id != NULL) can only be
+    # used by their creator. Global personas (NULL) are accessible to everyone.
+    if persona.creator_user_id is not None and persona.creator_user_id != user.id:
         raise ValueError(f"AI persona {ai_id} not found")
 
     media_metadata: dict = {"original_url": media_url}

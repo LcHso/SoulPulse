@@ -137,6 +137,7 @@ async def get_posts(
     result = await db.execute(
         select(Post, AIPersona)
         .join(AIPersona, Post.ai_id == AIPersona.id)
+        .where(Post.status == 1)
         .order_by(Post.created_at.desc())
         .offset(offset)
         .limit(limit)

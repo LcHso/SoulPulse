@@ -60,7 +60,7 @@ from fastapi import (
 )
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update, delete, and_, case
+from sqlalchemy import select, func, update, delete, and_, case, or_
 
 from core.database import get_db, async_session
 from core.security import get_current_user, authenticate_ws_token
@@ -160,6 +160,7 @@ class ConversationOut(BaseModel):
         last_message_at: 最后消息时间
         unread_count: 未读消息数
         intimacy_score: 亲密度分数
+        persona_type: AI 人格类型（"official" 或 "imported"）
     """
     ai_id: int
     ai_name: str
@@ -168,6 +169,7 @@ class ConversationOut(BaseModel):
     last_message_at: str
     unread_count: int
     intimacy_score: float
+    persona_type: Optional[str] = None
 
 
 # ── POST /send 发送消息 ──────────────────────────────────────────────────
@@ -247,8 +249,16 @@ async def get_conversations(
         return []
 
     # 加载 AI 人格信息
+    # Visibility filter: include only global personas plus the current user's
+    # own private personas. Hidden personas are skipped from the conversation list.
     personas_result = await db.execute(
-        select(AIPersona).where(AIPersona.id.in_(ai_ids))
+        select(AIPersona).where(
+            AIPersona.id.in_(ai_ids),
+            or_(
+                AIPersona.creator_user_id.is_(None),
+                AIPersona.creator_user_id == current_user.id,
+            ),
+        )
     )
     persona_map = {p.id: p for p in personas_result.scalars().all()}
 
@@ -296,6 +306,7 @@ async def get_conversations(
             last_message_at=to_utc_iso(last_msg.created_at) if last_msg and last_msg.created_at else "",
             unread_count=unread_count,
             intimacy_score=intimacy_map.get(ai_id, 0.0),
+            persona_type=getattr(persona, "persona_type", None),
         ))
 
     # 按最后消息时间降序排列
@@ -445,6 +456,14 @@ async def get_chat_history(
             select(AIPersona).where(AIPersona.id == ai_id)
         )
         persona = persona_result.scalar_one_or_none()
+
+        # Private personas are only accessible to their creator.
+        if (
+            persona
+            and persona.creator_user_id is not None
+            and persona.creator_user_id != current_user.id
+        ):
+            raise HTTPException(status_code=404, detail="AI persona not found")
 
         if persona:
             # 生成欢迎消息

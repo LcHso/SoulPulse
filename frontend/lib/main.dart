@@ -1,17 +1,28 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 import 'core/api/api_client.dart';
 import 'core/theme/app_theme.dart';
 import 'core/router/app_router.dart';
 import 'core/providers/auth_provider.dart';
+import 'core/services/app_monitor.dart';
 import 'core/services/local_notification_service.dart';
 import 'core/services/fcm_service.dart';
 
 void main() async {
+  // Mark app start time for startup performance measurement
+  AppMonitor.instance.markAppStart();
+
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Reduce VisibilityDetector update interval for faster lazy-image triggering
+  VisibilityDetectorController.instance.updateInterval =
+      const Duration(milliseconds: 100);
+
   await ApiClient.loadToken();
 
   // Initialize local notifications
@@ -20,21 +31,41 @@ void main() async {
   // Initialize FCM (will gracefully fail if not configured)
   try {
     await FcmService().initialize();
-    print('[Main] FCM initialized');
+    if (kDebugMode) print('[Main] FCM initialized');
   } catch (e) {
-    print('[Main] FCM initialization skipped: $e');
+    if (kDebugMode) print('[Main] FCM initialization skipped: $e');
     // FCM will fall back to local notification polling
   }
 
-  // Global error handling
+  // Global Flutter framework error handling
   FlutterError.onError = (details) {
-    FlutterError.presentError(details);
+    AppMonitor.instance.recordError(
+      details.exception,
+      details.stack,
+      context: 'FlutterError.onError: ${details.library}',
+      fatal: details.silent == false,
+    );
+    if (kDebugMode) {
+      FlutterError.presentError(details);
+    }
   };
 
+  // Catch async/zone errors
   runZonedGuarded(
-    () => runApp(const ProviderScope(child: SoulPulseApp())),
+    () {
+      runApp(const ProviderScope(child: SoulPulseApp()));
+
+      // Measure startup time after the first frame is rendered
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        AppMonitor.instance.markFirstFrame();
+      });
+    },
     (error, stack) {
-      debugPrint('Uncaught error: $error\n$stack');
+      AppMonitor.instance.recordError(
+        error,
+        stack,
+        context: 'runZonedGuarded',
+      );
     },
   );
 }

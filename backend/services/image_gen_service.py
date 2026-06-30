@@ -19,13 +19,16 @@ wan2.6+ 官方端点规范:
 
 import asyncio
 import hashlib
+import os
 import random
+import time
 import uuid
 from pathlib import Path
 
 import httpx
 
 from core.config import settings
+from services.nai_image_service import nai_service
 
 # ── 图像尺寸配置 ──────────────────────────────────────────
 # 加权随机选择：40% 9:16 竖版，30% 1:1 方形，30% 16:9 横版
@@ -60,13 +63,165 @@ _NEW_API_PREFIXES = ("wan2.6", "wan2.7", "wan2.8", "wan2.9", "wan3")
 # 本地静态文件存储目录
 _STATIC_DIR = Path(__file__).parent.parent / "static" / "posts"
 
+
+# ── NAI Backend Helpers ──────────────────────────────────────────
+
+
+def _parse_size(size: str) -> tuple[int, int]:
+    """Parse DashScope-style size string (e.g. '720*1280') into (width, height)."""
+    parts = size.split("*")
+    return int(parts[0]), int(parts[1])
+
+
+def _nai_orientation_from_size(size: str) -> str:
+    """Map a size string to NAI orientation keyword."""
+    w, h = _parse_size(size)
+    if h > w:
+        return "portrait"
+    elif w > h:
+        return "landscape"
+    return "square"
+
+
+async def _nai_save_bytes(image_bytes: bytes, prefix: str = "post") -> str:
+    """Save NAI image bytes to static dir and return the URL path."""
+    _STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{prefix}_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+    filepath = _STATIC_DIR / filename
+    filepath.write_bytes(image_bytes)
+    return f"/static/posts/{filename}"
+
+
+async def _nai_generate_image(
+    prompt: str,
+    size: str | None = None,
+    n: int = 1,
+    persona_id: int | None = None,
+    negative_prompt: str | None = None,
+    outfit_override: dict | None = None,
+) -> list[str]:
+    """Route image generation through NovelAI backend.
+
+    Converts DashScope-style parameters to NAI format, generates the image,
+    saves to local static dir, and returns URL paths.
+    """
+    if not settings.NAI_API_KEY:
+        print("[image-gen] NAI_API_KEY not set, falling back to DashScope")
+        return await _dashscope_generate_image(
+            prompt=prompt, size=size, n=n,
+            persona_id=persona_id, negative_prompt=negative_prompt,
+            outfit_override=outfit_override,
+        )
+
+    # Determine dimensions
+    if size is None:
+        size = _get_random_size()
+    w, h = _parse_size(size)
+
+    # Apply outfit override to prompt
+    enriched_prompt = _apply_outfit_override(prompt, outfit_override)
+
+    # NAI seed
+    seed = _get_persona_seed(persona_id) if persona_id else int(time.time()) % 2**32
+
+    urls: list[str] = []
+    for _ in range(n):
+        image_bytes = await nai_service.generate_image(
+            prompt=enriched_prompt,
+            negative_prompt=negative_prompt,
+            width=w,
+            height=h,
+            seed=seed,
+        )
+        if image_bytes:
+            url = await _nai_save_bytes(image_bytes, prefix="gen")
+            urls.append(url)
+        else:
+            # NAI failed, try DashScope fallback for this image
+            print("[image-gen] NAI generation failed, falling back to DashScope")
+            fallback = await _dashscope_generate_image(
+                prompt=prompt, size=size, n=1,
+                persona_id=persona_id, negative_prompt=negative_prompt,
+                outfit_override=outfit_override,
+            )
+            urls.extend(fallback)
+        seed += 1  # Vary seed for multi-image
+
+    return urls
+
+
+async def _nai_generate_portrait(
+    visual_prompt_tags: str,
+    persona_id: int | None = None,
+) -> str:
+    """Generate a character portrait via NovelAI."""
+    if not settings.NAI_API_KEY:
+        print("[image-gen] NAI_API_KEY not set, falling back to DashScope portrait")
+        return await _dashscope_generate_base_portrait(visual_prompt_tags)
+
+    seed = _get_persona_seed(persona_id) if persona_id else int(time.time()) % 2**32
+    image_bytes = await nai_service.generate_portrait(
+        character_tags=visual_prompt_tags,
+        seed=seed,
+    )
+    if image_bytes:
+        return await _nai_save_bytes(image_bytes, prefix="portrait")
+
+    # Fallback
+    return await _dashscope_generate_base_portrait(visual_prompt_tags)
+
+
+async def _nai_generate_scene(
+    visual_prompt_tags: str,
+    scene_tags: str,
+    orientation: str = "landscape",
+    persona_id: int | None = None,
+) -> str:
+    """Generate a scene illustration via NovelAI."""
+    if not settings.NAI_API_KEY:
+        print("[image-gen] NAI_API_KEY not set, falling back to DashScope")
+        return ""
+
+    seed = _get_persona_seed(persona_id) if persona_id else int(time.time()) % 2**32
+    image_bytes = await nai_service.generate_scene(
+        character_tags=visual_prompt_tags,
+        scene_tags=scene_tags,
+        orientation=orientation,
+        seed=seed,
+    )
+    if image_bytes:
+        return await _nai_save_bytes(image_bytes, prefix="scene")
+    return ""
+
+
+async def _nai_generate_post_image(
+    visual_prompt_tags: str,
+    scenario_tags: str,
+    orientation: str = "portrait",
+    persona_id: int | None = None,
+) -> str:
+    """Generate a post image via NovelAI."""
+    if not settings.NAI_API_KEY:
+        print("[image-gen] NAI_API_KEY not set, falling back to DashScope")
+        return ""
+
+    seed = _get_persona_seed(persona_id) if persona_id else int(time.time()) % 2**32
+    image_bytes = await nai_service.generate_post_image(
+        character_tags=visual_prompt_tags,
+        scenario_tags=scenario_tags,
+        orientation=orientation,
+        seed=seed,
+    )
+    if image_bytes:
+        return await _nai_save_bytes(image_bytes, prefix="post")
+    return ""
+
 # ── 动漫/2D 插画风格锚点 ──────────────────────────────────────────
 # Genshin Impact / Love and Deepspace 同等品质基准
 # 所有图片生成强制套用以下风格关键词，确保整站视觉统一
 ANIME_STYLE_POSITIVE = (
     "anime illustration, clean lineart, vibrant colors, professional character design, "
-    "bishounen, detailed eyes, high quality, masterpiece, best quality, "
-    "anime coloring, cel shading"
+    "bishounen, detailed eyes, anime coloring, cel shading, soft anime lighting"
 )
 
 ANIME_STYLE_NEGATIVE = (
@@ -84,13 +239,14 @@ ANIME_CG_POSITIVE = (
 # ── 强制质量保护 ──────────────────────────────────────────
 # 历史负面词与新动漫风格负面词合并
 ENFORCED_NEGATIVE_PROMPT = (
-    f"{ANIME_STYLE_NEGATIVE}, "
-    "missing fingers, extra limbs, disfigured, poorly drawn face, mutation, "
-    "text, overexposed, underexposed"
+    "photorealistic, 3D render, uncanny valley, deformed, blurry, low quality, "
+    "bad anatomy, bad hands, extra fingers, fewer fingers, cropped, worst quality, "
+    "jpeg artifacts, signature, watermark, realistic photo, "
+    "missing fingers, extra limbs, disfigured, poorly drawn face, mutation"
 )
 
-# 风格后缀：所有 prompt 均会附加该后缀以保证 anime 风格落地
-QUALITY_SUFFIX = ANIME_STYLE_POSITIVE
+# 风格后缀：已移除重复 (内容优先, 风格后置于 ANIME_STYLE_POSITIVE)
+QUALITY_SUFFIX = ""
 
 DEFAULT_NEGATIVE_PROMPT = ENFORCED_NEGATIVE_PROMPT
 
@@ -365,8 +521,9 @@ async def generate_image(
     persona_id: int | None = None,
     negative_prompt: str | None = None,
     outfit_override: dict | None = None,
+    seed: int | None = None,
 ) -> list[str]:
-    """从文本提示生成图片。自动根据模型名选择 API 格式。
+    """统一图片生成入口 - 根据 IMAGE_BACKEND 路由到 NAI 或 DashScope。
 
     Args:
         prompt: 图像生成提示词
@@ -375,6 +532,44 @@ async def generate_image(
         persona_id: 角色ID（用于种子一致性）
         negative_prompt: 负面提示词
         outfit_override: 服装/场景覆写 dict，会被拼接到 prompt 最前面
+        seed: 直接指定种子（优先于 persona_id 派生种子）
+
+    Returns:
+        list[str]: 生成的图像URL列表
+    """
+    if settings.IMAGE_BACKEND == "nai":
+        return await _nai_generate_image(
+            prompt=prompt, size=size, n=n,
+            persona_id=persona_id, negative_prompt=negative_prompt,
+            outfit_override=outfit_override,
+        )
+    return await _dashscope_generate_image(
+        prompt=prompt, size=size, n=n,
+        persona_id=persona_id, negative_prompt=negative_prompt,
+        outfit_override=outfit_override,
+        seed=seed,
+    )
+
+
+async def _dashscope_generate_image(
+    prompt: str,
+    size: str | None = None,
+    n: int = 1,
+    persona_id: int | None = None,
+    negative_prompt: str | None = None,
+    outfit_override: dict | None = None,
+    seed: int | None = None,
+) -> list[str]:
+    """DashScope 后端：从文本提示生成图片。自动根据模型名选择 API 格式。
+
+    Args:
+        prompt: 图像生成提示词
+        size: 图像尺寸（如 "720*1280"），为 None 时随机选择
+        n: 生成数量
+        persona_id: 角色ID（用于种子一致性）
+        negative_prompt: 负面提示词
+        outfit_override: 服装/场景覆写 dict，会被拼接到 prompt 最前面
+        seed: 直接指定种子（优先于 persona_id 派生种子）
 
     Returns:
         list[str]: 生成的图像URL列表
@@ -390,7 +585,7 @@ async def generate_image(
 
     # 服装/场景覆写词优先于原 prompt，再叠加 anime 风格锚点
     enriched_prompt = _apply_outfit_override(prompt, outfit_override)
-    full_prompt = f"{ANIME_STYLE_POSITIVE}, {enriched_prompt}, {QUALITY_SUFFIX}"
+    full_prompt = f"{enriched_prompt}, {ANIME_STYLE_POSITIVE}"
     model = settings.DASHSCOPE_IMAGE_MODEL
     # 拼接用户负面词与强制负面词，确保始终排除写实/低质内容
     neg = (
@@ -404,10 +599,12 @@ async def generate_image(
             "size": size,
             "n": n,
             "negative_prompt": neg,
-            "prompt_extend": False,
+            "prompt_extend": True,
             "watermark": False,
         }
-        if persona_id is not None:
+        if seed is not None:
+            parameters["seed"] = seed
+        elif persona_id is not None:
             parameters["seed"] = _get_persona_seed(persona_id)
 
         payload = {
@@ -469,7 +666,7 @@ async def generate_image_with_face_ref(
 
     # 即使带面部参考，也强制叠加 anime 风格锚点，避免被参考图带偏成写实
     enriched_prompt = _apply_outfit_override(prompt, outfit_override)
-    full_prompt = f"{ANIME_STYLE_POSITIVE}, {enriched_prompt}, {QUALITY_SUFFIX}"
+    full_prompt = f"{enriched_prompt}, {ANIME_STYLE_POSITIVE}"
     model = settings.DASHSCOPE_IMAGE_MODEL
     neg = (
         f"{ENFORCED_NEGATIVE_PROMPT}, {negative_prompt}"
@@ -528,8 +725,27 @@ async def generate_base_portrait(
     visual_prompt_tags: str,
     gender: str = "male",
     style: str = "anime illustration",
+    persona_id: int | None = None,
 ) -> str:
-    """生成基础肖像图, 用于角色视觉一致性系统。
+    """统一肖像生成入口 - 根据 IMAGE_BACKEND 路由到 NAI 或 DashScope。
+
+    采用 anime/2D 插画风格（非写实），对标 Genshin Impact / Love and Deepspace。
+    生成的肖像同时作为后续图像生成的 face reference，必须严格保持 anime 风格。
+    """
+    if settings.IMAGE_BACKEND == "nai":
+        result = await _nai_generate_portrait(visual_prompt_tags, persona_id=persona_id)
+        if result:
+            return result
+        # Fall through to DashScope
+    return await _dashscope_generate_base_portrait(visual_prompt_tags, gender, style)
+
+
+async def _dashscope_generate_base_portrait(
+    visual_prompt_tags: str,
+    gender: str = "male",
+    style: str = "anime illustration",
+) -> str:
+    """DashScope 后端：生成基础肖像图, 用于角色视觉一致性系统。
 
     采用 anime/2D 插画风格（非写实），对标 Genshin Impact / Love and Deepspace。
     生成的肖像同时作为后续图像生成的 face reference，必须严格保持 anime 风格。
@@ -539,32 +755,82 @@ async def generate_base_portrait(
         return ""
     gender_tag = "1boy" if gender == "male" else "1girl"
 
-    # anime 角色三视图基础设定，构图以正面胸像为主，便于后续作为 face reference
+    # 干净单人正面半身像，禁止设计稿/参考图格式
     prompt = (
         f"{style}, {gender_tag}, {visual_prompt_tags}, "
-        f"official character design sheet, character reference, "
-        f"front view portrait, upper body, looking at viewer, "
-        f"neutral expression, simple plain background, "
+        f"solo portrait, front view, upper body, looking at viewer, "
+        f"neutral expression, simple gradient background, "
         f"soft anime lighting, clean lineart, cel shading, "
         f"masterpiece, best quality, ultra detailed face, detailed eyes"
     )
 
-    # 角色设定阶段，更严格地排除写实/侧脸/多人/低质
+    # 强制排除设计参考图格式、多视角、色板、标注文字
     negative = (
+        "character design sheet, reference sheet, turn around sheet, "
+        "model sheet, expression sheet, color palette, color swatch, "
+        "multiple views, front and back, turnaround, side view, back view, "
+        "text labels, annotations, callouts, panel layout, grid layout, "
+        "multiple panels, chibi, deformed, "
         "photorealistic, realistic photo, 3D render, photograph, "
         "worst quality, low quality, deformed face, bad anatomy, "
-        "blurry, out of focus, ugly, profile, side view, back view, "
-        "multiple people, crowd, busy background, harsh lighting, "
-        "jpeg artifacts, watermark, signature, username"
+        "blurry, out of focus, multiple people, crowd, "
+        "jpeg artifacts, watermark, signature, username, title, heading"
     )
 
-    urls = await generate_image(
+    urls = await _dashscope_generate_image(
         prompt=prompt,
         size="1024*1024",
         n=1,
         negative_prompt=negative,
     )
 
+    return urls[0] if urls else ""
+
+
+async def generate_scene_image(
+    visual_prompt_tags: str,
+    scene_tags: str,
+    orientation: str = "landscape",
+    persona_id: int | None = None,
+) -> str:
+    """统一场景图生成入口 - 根据 IMAGE_BACKEND 路由到 NAI 或 DashScope。"""
+    if settings.IMAGE_BACKEND == "nai":
+        result = await _nai_generate_scene(
+            visual_prompt_tags=visual_prompt_tags,
+            scene_tags=scene_tags,
+            orientation=orientation,
+            persona_id=persona_id,
+        )
+        if result:
+            return result
+    # Fallback to DashScope via CG illustration
+    return await generate_cg_illustration(
+        prompt=f"{visual_prompt_tags}, {scene_tags}",
+        persona_id=persona_id,
+        size="1280*720" if orientation == "landscape" else "720*1280",
+    )
+
+
+async def generate_post_image_unified(
+    visual_prompt_tags: str,
+    scenario_tags: str,
+    orientation: str = "portrait",
+    persona_id: int | None = None,
+) -> str:
+    """统一帖子图片生成入口 - 根据 IMAGE_BACKEND 路由到 NAI 或 DashScope。"""
+    if settings.IMAGE_BACKEND == "nai":
+        result = await _nai_generate_post_image(
+            visual_prompt_tags=visual_prompt_tags,
+            scenario_tags=scenario_tags,
+            orientation=orientation,
+            persona_id=persona_id,
+        )
+        if result:
+            return result
+    # Fallback to DashScope
+    prompt = f"{visual_prompt_tags}, {scenario_tags}"
+    size = "832*1216" if orientation == "portrait" else "1216*832"
+    urls = await _dashscope_generate_image(prompt=prompt, size=size, n=1, persona_id=persona_id)
     return urls[0] if urls else ""
 
 

@@ -1,10 +1,22 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../../core/api/api_client.dart';
+import '../../shared/widgets/lazy_cached_image.dart';
 import 'outfit_models.dart';
 import 'outfit_service.dart';
+
+// ─── Providers ────────────────────────────────────────────────────────────────
+
+/// Provider for outfits list, keyed by persona ID
+final outfitsProvider =
+    FutureProvider.family<List<Outfit>, int>((ref, personaId) async {
+  final service = OutfitService();
+  return service.getOutfitsForPersona(personaId);
+});
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 /// Outfit selector page for a persona.
 ///
@@ -14,7 +26,7 @@ import 'outfit_service.dart';
 /// - Locked outfits show unlock condition
 /// - Equipped outfit highlighted
 /// - "装备" (equip) button for available outfits
-class OutfitsPage extends StatefulWidget {
+class OutfitsPage extends ConsumerStatefulWidget {
   final int personaId;
   final String personaName;
 
@@ -25,14 +37,11 @@ class OutfitsPage extends StatefulWidget {
   });
 
   @override
-  State<OutfitsPage> createState() => _OutfitsPageState();
+  ConsumerState<OutfitsPage> createState() => _OutfitsPageState();
 }
 
-class _OutfitsPageState extends State<OutfitsPage> {
+class _OutfitsPageState extends ConsumerState<OutfitsPage> {
   final OutfitService _service = OutfitService();
-  List<Outfit> _allOutfits = [];
-  bool _loading = true;
-  String? _error;
   String _selectedCategory = 'all';
   int? _equippingId;
 
@@ -45,38 +54,21 @@ class _OutfitsPageState extends State<OutfitsPage> {
     ('event', '活动'),
   ];
 
-  @override
-  void initState() {
-    super.initState();
-    _loadOutfits();
-  }
-
-  Future<void> _loadOutfits() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    try {
-      final outfits = await _service.getOutfitsForPersona(widget.personaId);
-      if (mounted) setState(() { _allOutfits = outfits; _loading = false; });
-    } catch (e) {
-      if (mounted) setState(() { _error = e.toString(); _loading = false; });
-    }
-  }
-
-  List<Outfit> get _filteredOutfits {
-    if (_selectedCategory == 'all') return _allOutfits;
-    return _allOutfits.where((o) => o.category == _selectedCategory).toList();
+  List<Outfit> _applyFilter(List<Outfit> allOutfits) {
+    if (_selectedCategory == 'all') return allOutfits;
+    return allOutfits
+        .where((o) => o.category == _selectedCategory)
+        .toList();
   }
 
   Future<void> _equipOutfit(Outfit outfit) async {
     if (_equippingId != null) return;
     setState(() => _equippingId = outfit.id);
-    final success = await _service.equipOutfit(widget.personaId, outfit.id);
+    final success =
+        await _service.equipOutfit(widget.personaId, outfit.id);
     if (success && mounted) {
       HapticFeedback.mediumImpact();
-      // Refresh outfit list to reflect new equipped state
-      await _loadOutfits();
+      ref.invalidate(outfitsProvider(widget.personaId));
     } else if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('装备失败，请稍后重试')),
@@ -92,7 +84,8 @@ class _OutfitsPageState extends State<OutfitsPage> {
       message = '花费 ${condition['gem_cost']} 星钻解锁?';
     } else if (condition.containsKey('intimacy_level')) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('需要亲密度达到 Lv.${condition['intimacy_level']}')),
+        SnackBar(
+            content: Text('需要亲密度达到 Lv.${condition['intimacy_level']}')),
       );
       return;
     }
@@ -116,10 +109,11 @@ class _OutfitsPageState extends State<OutfitsPage> {
     );
 
     if (confirmed == true && mounted) {
-      final success = await _service.unlockOutfit(widget.personaId, outfit.id);
+      final success =
+          await _service.unlockOutfit(widget.personaId, outfit.id);
       if (success) {
         HapticFeedback.heavyImpact();
-        await _loadOutfits();
+        ref.invalidate(outfitsProvider(widget.personaId));
       } else if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('解锁失败')),
@@ -132,6 +126,7 @@ class _OutfitsPageState extends State<OutfitsPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final asyncOutfits = ref.watch(outfitsProvider(widget.personaId));
 
     return Scaffold(
       appBar: AppBar(
@@ -141,32 +136,36 @@ class _OutfitsPageState extends State<OutfitsPage> {
           onPressed: () => context.pop(),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.error_outline,
-                          size: 48, color: theme.colorScheme.error),
-                      const SizedBox(height: 12),
-                      Text(_error!),
-                      const SizedBox(height: 16),
-                      FilledButton.icon(
-                        onPressed: _loadOutfits,
-                        icon: const Icon(Icons.refresh, size: 18),
-                        label: const Text('重试'),
-                      ),
-                    ],
-                  ),
-                )
-              : Column(
-                  children: [
-                    _buildCategoryTabs(theme),
-                    Expanded(child: _buildGrid(theme, isDark)),
-                  ],
-                ),
+      body: asyncOutfits.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline,
+                  size: 48, color: theme.colorScheme.error),
+              const SizedBox(height: 12),
+              Text(error.toString()),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () =>
+                    ref.invalidate(outfitsProvider(widget.personaId)),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('重试'),
+              ),
+            ],
+          ),
+        ),
+        data: (allOutfits) {
+          final filteredOutfits = _applyFilter(allOutfits);
+          return Column(
+            children: [
+              _buildCategoryTabs(theme),
+              Expanded(child: _buildGrid(filteredOutfits, theme, isDark)),
+            ],
+          );
+        },
+      ),
     );
   }
 
@@ -186,7 +185,8 @@ class _OutfitsPageState extends State<OutfitsPage> {
             onTap: () => setState(() => _selectedCategory = key),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
               decoration: BoxDecoration(
                 color: selected
                     ? theme.colorScheme.primary
@@ -198,7 +198,8 @@ class _OutfitsPageState extends State<OutfitsPage> {
                   label,
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+                    fontWeight:
+                        selected ? FontWeight.w600 : FontWeight.w400,
                     color: selected
                         ? Colors.white
                         : theme.colorScheme.onSurfaceVariant,
@@ -212,8 +213,7 @@ class _OutfitsPageState extends State<OutfitsPage> {
     );
   }
 
-  Widget _buildGrid(ThemeData theme, bool isDark) {
-    final items = _filteredOutfits;
+  Widget _buildGrid(List<Outfit> items, ThemeData theme, bool isDark) {
     if (items.isEmpty) {
       return Center(
         child: Column(
@@ -223,8 +223,8 @@ class _OutfitsPageState extends State<OutfitsPage> {
                 size: 56, color: theme.colorScheme.outline),
             const SizedBox(height: 12),
             Text('暂无衣装',
-                style: theme.textTheme.bodyLarge?.copyWith(
-                    color: theme.colorScheme.outline)),
+                style: theme.textTheme.bodyLarge
+                    ?.copyWith(color: theme.colorScheme.outline)),
           ],
         ),
       );
@@ -277,18 +277,19 @@ class _OutfitsPageState extends State<OutfitsPage> {
                   fit: StackFit.expand,
                   children: [
                     if (imageUrl.isNotEmpty)
-                      CachedNetworkImage(
+                      LazyCachedImage(
                         imageUrl: imageUrl,
                         fit: BoxFit.cover,
-                        placeholder: (_, __) => Container(
+                        placeholder: (context) => Container(
                           color: isDark
                               ? Colors.grey.shade800
                               : Colors.grey.shade100,
                           child: const Center(
-                              child:
-                                  CircularProgressIndicator(strokeWidth: 2)),
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2)),
                         ),
-                        errorWidget: (_, __, ___) => _outfitPlaceholder(isDark),
+                        errorWidget: (context, url, error) =>
+                            _outfitPlaceholder(isDark),
                       )
                     else
                       _outfitPlaceholder(isDark),
@@ -390,7 +391,8 @@ class _OutfitsPageState extends State<OutfitsPage> {
                                   width: 14,
                                   height: 14,
                                   child: CircularProgressIndicator(
-                                      strokeWidth: 2, color: Colors.white),
+                                      strokeWidth: 2,
+                                      color: Colors.white),
                                 )
                               : const Text('装备'),
                         ),
@@ -424,7 +426,8 @@ class _OutfitsPageState extends State<OutfitsPage> {
       child: Center(
         child: Icon(Icons.checkroom,
             size: 40,
-            color: isDark ? Colors.grey.shade600 : Colors.grey.shade400),
+            color:
+                isDark ? Colors.grey.shade600 : Colors.grey.shade400),
       ),
     );
   }

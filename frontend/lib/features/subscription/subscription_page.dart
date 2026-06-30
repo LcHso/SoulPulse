@@ -1,7 +1,27 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'subscription_service.dart';
+
+// ─── Providers ────────────────────────────────────────────────────────────────
+
+/// Combined subscription data: tiers + current status
+class SubscriptionData {
+  final List<SubscriptionTier> tiers;
+  final SubscriptionStatus status;
+
+  const SubscriptionData({required this.tiers, required this.status});
+}
+
+final subscriptionDataProvider = FutureProvider<SubscriptionData>((ref) async {
+  final service = SubscriptionService();
+  final tiers = await service.getTiers();
+  final status = await service.getMySubscription();
+  return SubscriptionData(tiers: tiers, status: status);
+});
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 /// Subscription management page.
 ///
@@ -12,38 +32,16 @@ import 'subscription_service.dart';
 /// - Price display (gems/month)
 /// - Subscribe button (with confirmation dialog)
 /// - Active subscription info: expiry, auto-renew toggle
-class SubscriptionPage extends StatefulWidget {
+class SubscriptionPage extends ConsumerStatefulWidget {
   const SubscriptionPage({super.key});
 
   @override
-  State<SubscriptionPage> createState() => _SubscriptionPageState();
+  ConsumerState<SubscriptionPage> createState() => _SubscriptionPageState();
 }
 
-class _SubscriptionPageState extends State<SubscriptionPage> {
+class _SubscriptionPageState extends ConsumerState<SubscriptionPage> {
   final SubscriptionService _service = SubscriptionService();
-  List<SubscriptionTier> _tiers = [];
-  SubscriptionStatus? _status;
-  bool _loading = true;
   int? _subscribingTierId;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadData();
-  }
-
-  Future<void> _loadData() async {
-    setState(() => _loading = true);
-    final tiers = await _service.getTiers();
-    final status = await _service.getMySubscription();
-    if (mounted) {
-      setState(() {
-        _tiers = tiers;
-        _status = status;
-        _loading = false;
-      });
-    }
-  }
 
   Future<void> _subscribe(SubscriptionTier tier) async {
     final confirmed = await showDialog<bool>(
@@ -79,7 +77,7 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('已订阅 ${tier.displayName}')),
         );
-        _loadData();
+        ref.invalidate(subscriptionDataProvider);
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('订阅失败，请稍后重试')),
@@ -88,8 +86,8 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
     }
   }
 
-  Future<void> _toggleAutoRenew() async {
-    if (_status == null || !_status!.autoRenew) return;
+  Future<void> _toggleAutoRenew(SubscriptionStatus status) async {
+    if (!status.autoRenew) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -111,7 +109,7 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
     if (confirmed == true && mounted) {
       final success = await _service.cancelAutoRenew();
       if (success) {
-        _loadData();
+        ref.invalidate(subscriptionDataProvider);
       }
     }
   }
@@ -120,6 +118,7 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final asyncData = ref.watch(subscriptionDataProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -129,34 +128,52 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
           onPressed: () => context.pop(),
         ),
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                children: [
-                  // Current tier badge
-                  _buildCurrentTier(theme, isDark),
-                  const SizedBox(height: 20),
-                  // Tier cards
-                  ..._tiers.map((tier) => Padding(
-                        padding: const EdgeInsets.only(bottom: 16),
-                        child: _buildTierCard(tier, theme, isDark),
-                      )),
-                  // Subscription info
-                  if (_status != null &&
-                      _status!.tierName != 'free') ...[
-                    const SizedBox(height: 8),
-                    _buildSubscriptionInfo(theme, isDark),
-                  ],
-                ],
+      body: asyncData.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline,
+                  size: 48, color: theme.colorScheme.error),
+              const SizedBox(height: 12),
+              Text('加载失败', style: theme.textTheme.bodyMedium),
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: () => ref.invalidate(subscriptionDataProvider),
+                icon: const Icon(Icons.refresh, size: 18),
+                label: const Text('重试'),
               ),
-            ),
+            ],
+          ),
+        ),
+        data: (data) => SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              // Current tier badge
+              _buildCurrentTier(data.status, theme, isDark),
+              const SizedBox(height: 20),
+              // Tier cards
+              ...data.tiers.map((tier) => Padding(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    child: _buildTierCard(tier, data.status, theme, isDark),
+                  )),
+              // Subscription info
+              if (data.status.tierName != 'free') ...[
+                const SizedBox(height: 8),
+                _buildSubscriptionInfo(data.status, theme, isDark),
+              ],
+            ],
+          ),
+        ),
+      ),
     );
   }
 
-  Widget _buildCurrentTier(ThemeData theme, bool isDark) {
-    final tierName = _status?.tierName ?? 'free';
+  Widget _buildCurrentTier(
+      SubscriptionStatus status, ThemeData theme, bool isDark) {
+    final tierName = status.tierName;
     final (label, color, icon) = _tierVisuals(tierName);
 
     return Container(
@@ -203,8 +220,9 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
     );
   }
 
-  Widget _buildTierCard(SubscriptionTier tier, ThemeData theme, bool isDark) {
-    final isCurrent = _status?.tierName == tier.name;
+  Widget _buildTierCard(SubscriptionTier tier, SubscriptionStatus status,
+      ThemeData theme, bool isDark) {
+    final isCurrent = status.tierName == tier.name;
     final (_, color, icon) = _tierVisuals(tier.name);
 
     return Container(
@@ -311,7 +329,8 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
     );
   }
 
-  Widget _buildSubscriptionInfo(ThemeData theme, bool isDark) {
+  Widget _buildSubscriptionInfo(
+      SubscriptionStatus status, ThemeData theme, bool isDark) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
@@ -326,18 +345,17 @@ class _SubscriptionPageState extends State<SubscriptionPage> {
               style: theme.textTheme.titleSmall
                   ?.copyWith(fontWeight: FontWeight.w600)),
           const SizedBox(height: 10),
-          if (_status!.expiryDate != null)
-            _infoRow('到期日期', _status!.expiryDate!, theme),
+          if (status.expiryDate != null)
+            _infoRow('到期日期', status.expiryDate!, theme),
           const SizedBox(height: 8),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text('自动续费', style: theme.textTheme.bodyMedium),
               Switch.adaptive(
-                value: _status!.autoRenew,
-                onChanged: _status!.autoRenew
-                    ? (_) => _toggleAutoRenew()
-                    : null,
+                value: status.autoRenew,
+                onChanged:
+                    status.autoRenew ? (_) => _toggleAutoRenew(status) : null,
                 activeColor: theme.colorScheme.primary,
               ),
             ],

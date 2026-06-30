@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -69,6 +70,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             trailing: const Icon(Icons.chevron_right),
             onTap: () => context.push('/terms'),
           ),
+
+          // Debug monitor - visible in debug mode or for admin users
+          if (kDebugMode || (authState.user?['is_admin'] == true))
+            ..._buildDebugSection(context),
 
           const Divider(),
           // Logout
@@ -242,6 +247,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ],
       ),
     );
+  }
+
+  List<Widget> _buildDebugSection(BuildContext context) {
+    return [
+      const Divider(),
+      _SectionHeader('Developer'),
+      ListTile(
+        leading: const Icon(Icons.bug_report_outlined),
+        title: const Text('App Monitor'),
+        subtitle: const Text('Errors, performance, API stats'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => context.push('/debug-monitor'),
+      ),
+    ];
   }
 }
 

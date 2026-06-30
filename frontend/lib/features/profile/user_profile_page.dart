@@ -6,6 +6,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../core/providers/auth_provider.dart';
 import '../../core/providers/notification_provider.dart';
 import '../../core/api/api_client.dart';
+import '../../core/theme/breakpoints.dart';
 
 final _interactionsProvider = FutureProvider<List<dynamic>>((ref) async {
   return ApiClient.getList('/api/ai/interactions/summary');
@@ -87,143 +88,150 @@ class _UserProfilePageState extends ConsumerState<UserProfilePage> {
           await ref.read(authProvider.notifier).loadUser();
           ref.invalidate(_interactionsProvider);
         },
-        child: ListView(
-          padding: const EdgeInsets.all(16),
-          children: [
-            // User info card
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.surface,
-                borderRadius: BorderRadius.circular(16),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withAlpha(isDark ? 40 : 15),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
+        child: Center(
+          child: ConstrainedBox(
+            constraints:
+                const BoxConstraints(maxWidth: Breakpoints.maxContentWidth),
+            child: ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                // User info card
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    color: Theme.of(context).colorScheme.surface,
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withAlpha(isDark ? 40 : 15),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 36,
-                    backgroundColor: Theme.of(context).colorScheme.primary,
-                    child: Text(
-                      (user?['nickname'] as String? ?? 'U')[0].toUpperCase(),
-                      style: GoogleFonts.inter(
-                          fontSize: 28,
-                          fontWeight: FontWeight.w700,
-                          color: Colors.white),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          user?['nickname'] ?? 'User',
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 36,
+                        backgroundColor: Theme.of(context).colorScheme.primary,
+                        child: Text(
+                          (user?['nickname'] as String? ?? 'U')[0]
+                              .toUpperCase(),
                           style: GoogleFonts.inter(
-                              fontWeight: FontWeight.w700, fontSize: 18),
+                              fontSize: 28,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.white),
                         ),
-                        const SizedBox(height: 4),
-                        Text(
-                          user?['email'] ?? '',
-                          style: GoogleFonts.inter(
-                              fontSize: 13, color: Colors.grey[500]),
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Icon(Icons.diamond_outlined,
-                                size: 16, color: Colors.amber[600]),
-                            const SizedBox(width: 4),
                             Text(
-                              '${user?['gem_balance'] ?? 0} Gems',
+                              user?['nickname'] ?? 'User',
                               style: GoogleFonts.inter(
-                                  fontSize: 13,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.amber[700]),
+                                  fontWeight: FontWeight.w700, fontSize: 18),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              user?['email'] ?? '',
+                              style: GoogleFonts.inter(
+                                  fontSize: 13, color: Colors.grey[500]),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Icon(Icons.diamond_outlined,
+                                    size: 16, color: Colors.amber[600]),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${user?['gem_balance'] ?? 0} Gems',
+                                  style: GoogleFonts.inter(
+                                      fontSize: 13,
+                                      fontWeight: FontWeight.w600,
+                                      color: Colors.amber[700]),
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                      ],
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+
+                // Relationships section
+                Text(
+                  'My Relationships',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+                const SizedBox(height: 12),
+
+                interactionsAsync.when(
+                  loading: () => const Center(
+                      child: Padding(
+                    padding: EdgeInsets.all(20),
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )),
+                  error: (_, __) => Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Text('Failed to load relationships',
+                          style: GoogleFonts.inter(color: Colors.grey)),
                     ),
                   ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 24),
-
-            // Relationships section
-            Text(
-              'My Relationships',
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 12),
-
-            interactionsAsync.when(
-              loading: () => const Center(
-                  child: Padding(
-                padding: EdgeInsets.all(20),
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )),
-              error: (_, __) => Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Text('Failed to load relationships',
-                      style: GoogleFonts.inter(color: Colors.grey)),
-                ),
-              ),
-              data: (interactions) {
-                if (interactions.isEmpty) {
-                  return Container(
-                    padding: const EdgeInsets.all(24),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).colorScheme.surface,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Column(
-                      children: [
-                        Icon(Icons.people_outline,
-                            size: 48, color: Colors.grey[400]),
-                        const SizedBox(height: 12),
-                        Text('No relationships yet',
-                            style: GoogleFonts.inter(color: Colors.grey)),
-                        const SizedBox(height: 8),
-                        TextButton(
-                          onPressed: () => context.go('/discover'),
-                          child: const Text('Find AI Companions'),
+                  data: (interactions) {
+                    if (interactions.isEmpty) {
+                      return Container(
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(
+                          color: Theme.of(context).colorScheme.surface,
+                          borderRadius: BorderRadius.circular(12),
                         ),
-                      ],
-                    ),
-                  );
-                }
-                return Column(
-                  children: interactions.map<Widget>((i) {
-                    final item = i as Map<String, dynamic>;
-                    final intimacy =
-                        (item['intimacy_score'] as num?)?.toDouble() ?? 0;
-                    final hint =
-                        item['emotion_hint'] as Map<String, dynamic>? ?? {};
-                    return _RelationshipCard(
-                      item: item,
-                      intimacy: intimacy,
-                      emotionHint: hint,
-                      isDark: isDark,
-                      onTap: () {
-                        final aiId = item['ai_id'] as int;
-                        final name = item['ai_name'] as String? ?? 'AI';
-                        context.push(
-                            '/ai/$aiId?name=${Uri.encodeComponent(name)}');
-                      },
+                        child: Column(
+                          children: [
+                            Icon(Icons.people_outline,
+                                size: 48, color: Colors.grey[400]),
+                            const SizedBox(height: 12),
+                            Text('No relationships yet',
+                                style: GoogleFonts.inter(color: Colors.grey)),
+                            const SizedBox(height: 8),
+                            TextButton(
+                              onPressed: () => context.go('/discover'),
+                              child: const Text('Find AI Companions'),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                    return Column(
+                      children: interactions.map<Widget>((i) {
+                        final item = i as Map<String, dynamic>;
+                        final intimacy =
+                            (item['intimacy_score'] as num?)?.toDouble() ?? 0;
+                        final hint =
+                            item['emotion_hint'] as Map<String, dynamic>? ?? {};
+                        return _RelationshipCard(
+                          item: item,
+                          intimacy: intimacy,
+                          emotionHint: hint,
+                          isDark: isDark,
+                          onTap: () {
+                            final aiId = item['ai_id'] as int;
+                            final name = item['ai_name'] as String? ?? 'AI';
+                            context.push(
+                                '/ai/$aiId?name=${Uri.encodeComponent(name)}');
+                          },
+                        );
+                      }).toList(),
                     );
-                  }).toList(),
-                );
-              },
+                  },
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );

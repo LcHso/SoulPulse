@@ -75,6 +75,14 @@ class PersonaFeaturesMenu extends StatelessWidget {
             subtitle: '解锁更多功能',
             onTap: () => context.push('/subscription'),
           ),
+          _divider(isDark),
+          _FeatureTile(
+            icon: Icons.auto_awesome_outlined,
+            iconColor: Colors.purple.shade300,
+            title: '导入角色卡',
+            subtitle: 'SillyTavern PNG / JSON',
+            onTap: () => context.push('/import-character'),
+          ),
         ],
       ),
     );

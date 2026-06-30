@@ -1,11 +1,20 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Space, Tag, message, Tabs, Card, Descriptions, Typography, Select } from 'antd';
-import { EditOutlined, EyeOutlined, SendOutlined } from '@ant-design/icons';
+import { Table, Button, Modal, Form, Input, Space, Tag, message, Tabs, Card, Descriptions, Typography, Select, Upload, Alert, Spin } from 'antd';
+import type { UploadFile, RcFile } from 'antd/es/upload/interface';
+import { EditOutlined, EyeOutlined, SendOutlined, ImportOutlined, InboxOutlined } from '@ant-design/icons';
 import client from '../../api/client';
 import { formatDateTime } from '../../utils/formatDate';
 
-const { Title } = Typography;
+const { Title, Paragraph, Text } = Typography;
 const { TextArea } = Input;
+const { Dragger } = Upload;
+
+interface ParsedCardPreview {
+  name: string;
+  bio: string;
+  avatarDataUrl: string | null;
+  isPng: boolean;
+}
 
 interface Persona {
   id: number;
@@ -34,6 +43,15 @@ const PersonaPage: React.FC = () => {
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
   const [emotions, setEmotions] = useState<any[]>([]);
   const [milestones, setMilestones] = useState<any[]>([]);
+
+  // ── Import-card modal state ───────────────────────────────
+  const [importVisible, setImportVisible] = useState(false);
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [nameOverride, setNameOverride] = useState('');
+  const [parsing, setParsing] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [preview, setPreview] = useState<ParsedCardPreview | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -93,6 +111,140 @@ const PersonaPage: React.FC = () => {
     loadMilestones(p.id);
   };
 
+  // ── Import-card flow ───────────────────────────────────────
+  const resetImportState = () => {
+    setImportFile(null);
+    setNameOverride('');
+    setPreview(null);
+    setImportError(null);
+    setParsing(false);
+    setImporting(false);
+  };
+
+  const openImport = () => {
+    resetImportState();
+    setImportVisible(true);
+  };
+
+  const closeImport = () => {
+    if (importing) return;
+    setImportVisible(false);
+    resetImportState();
+  };
+
+  const readFileAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(file);
+    });
+
+  const parseFile = async (file: File) => {
+    setParsing(true);
+    setImportError(null);
+    setPreview(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      // Preview endpoint lives at /api/character-cards/import (outside /api/admin),
+      // override baseURL on this single request.
+      const res = await client.post('/character-cards/import', formData, {
+        baseURL: '/api',
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const card = res.data?.card ?? {};
+      const dataSection = (card && typeof card.data === 'object' && card.data) || {};
+      const parsedName: string =
+        (dataSection.name as string) || (card.name as string) || '';
+      const parsedBio: string =
+        (dataSection.description as string) ||
+        (card.description as string) ||
+        (dataSection.personality as string) ||
+        '';
+
+      const isPng =
+        (file.name || '').toLowerCase().endsWith('.png') ||
+        file.type === 'image/png';
+      const avatarDataUrl = isPng ? await readFileAsDataUrl(file) : null;
+
+      setPreview({
+        name: parsedName,
+        bio: parsedBio,
+        avatarDataUrl,
+        isPng,
+      });
+    } catch (err: any) {
+      setImportError(
+        err?.response?.data?.detail || err?.message || 'Failed to parse card',
+      );
+    } finally {
+      setParsing(false);
+    }
+  };
+
+  const handleFileChosen = (file: RcFile): boolean => {
+    const name = (file.name || '').toLowerCase();
+    const isPng = name.endsWith('.png') || file.type === 'image/png';
+    const isJson =
+      name.endsWith('.json') ||
+      file.type === 'application/json' ||
+      file.type === 'text/json';
+    if (!isPng && !isJson) {
+      message.error('Only .png or .json character card files are accepted');
+      return false;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      message.error('File too large. Maximum allowed size is 10MB.');
+      return false;
+    }
+    setImportFile(file);
+    parseFile(file);
+    // Returning false prevents antd Upload from auto-uploading.
+    return false;
+  };
+
+  const confirmImport = async () => {
+    if (!importFile) {
+      setImportError('Please choose a character card file first');
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    try {
+      const formData = new FormData();
+      formData.append('file', importFile);
+      if (nameOverride.trim()) {
+        formData.append('name_override', nameOverride.trim());
+      }
+      const res = await client.post('/personas/import-card', formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      message.success(`Imported persona: ${res.data?.name ?? 'OK'}`);
+      setImportVisible(false);
+      resetImportState();
+      load();
+    } catch (err: any) {
+      setImportError(
+        err?.response?.data?.detail || err?.message || 'Import failed',
+      );
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const uploadFileList: UploadFile[] = importFile
+    ? [
+        {
+          uid: '-1',
+          name: importFile.name,
+          status: 'done',
+          size: importFile.size,
+          type: importFile.type,
+        },
+      ]
+    : [];
+
   const columns = [
     {
       title: 'Avatar', dataIndex: 'avatar_url', width: 60,
@@ -115,7 +267,14 @@ const PersonaPage: React.FC = () => {
 
   return (
     <div>
-      <Title level={4}>Persona & Soul Lab</Title>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <Title level={4} style={{ margin: 0 }}>Persona & Soul Lab</Title>
+        <Space>
+          <Button type="primary" icon={<ImportOutlined />} onClick={openImport}>
+            Import Card
+          </Button>
+        </Space>
+      </div>
       <Tabs activeKey={tab} onChange={setTab} items={[
         { key: 'list', label: 'All Personas' },
         { key: 'detail', label: selectedPersona ? selectedPersona.name : 'Detail', disabled: !selectedPersona },
@@ -215,6 +374,139 @@ const PersonaPage: React.FC = () => {
             <Select options={[{ value: 1, label: 'Active' }, { value: 0, label: 'Inactive' }]} />
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="Import Character Card"
+        open={importVisible}
+        onCancel={closeImport}
+        width={640}
+        maskClosable={!importing}
+        closable={!importing}
+        footer={[
+          <Button key="cancel" onClick={closeImport} disabled={importing}>
+            Cancel
+          </Button>,
+          <Button
+            key="confirm"
+            type="primary"
+            loading={importing}
+            disabled={!importFile || parsing || !!importError}
+            onClick={confirmImport}
+          >
+            Confirm Import
+          </Button>,
+        ]}
+      >
+        <Dragger
+          accept=".png,.json,image/png,application/json"
+          multiple={false}
+          maxCount={1}
+          beforeUpload={handleFileChosen}
+          onRemove={() => {
+            setImportFile(null);
+            setPreview(null);
+            setImportError(null);
+            return true;
+          }}
+          fileList={uploadFileList}
+          disabled={importing}
+        >
+          <p className="ant-upload-drag-icon"><InboxOutlined /></p>
+          <p className="ant-upload-text">Click or drag a .png / .json character card here</p>
+          <p className="ant-upload-hint">SillyTavern V2 cards supported. Max 10MB.</p>
+        </Dragger>
+
+        <Form layout="vertical" style={{ marginTop: 16 }}>
+          <Form.Item label="Name Override (optional)">
+            <Input
+              placeholder="Leave empty to use the card's name"
+              value={nameOverride}
+              onChange={(e) => setNameOverride(e.target.value)}
+              disabled={importing}
+              allowClear
+            />
+          </Form.Item>
+        </Form>
+
+        {parsing && (
+          <div style={{ textAlign: 'center', padding: '16px 0' }}>
+            <Spin /> <Text type="secondary" style={{ marginLeft: 8 }}>Parsing card…</Text>
+          </div>
+        )}
+
+        {preview && !parsing && (
+          <Card size="small" title="Preview" style={{ marginTop: 8 }}>
+            <div style={{ display: 'flex', gap: 16 }}>
+              {preview.avatarDataUrl ? (
+                <img
+                  src={preview.avatarDataUrl}
+                  alt="avatar preview"
+                  style={{
+                    width: 96,
+                    height: 96,
+                    objectFit: 'cover',
+                    borderRadius: 8,
+                    border: '1px solid #f0f0f0',
+                    flex: '0 0 auto',
+                  }}
+                />
+              ) : (
+                <div
+                  style={{
+                    width: 96,
+                    height: 96,
+                    borderRadius: 8,
+                    background: '#fafafa',
+                    border: '1px dashed #d9d9d9',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: '#bbb',
+                    fontSize: 12,
+                    flex: '0 0 auto',
+                  }}
+                >
+                  JSON
+                </div>
+              )}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Descriptions column={1} size="small">
+                  <Descriptions.Item label="Name">
+                    {nameOverride.trim() ? (
+                      <Space>
+                        <Text>{nameOverride.trim()}</Text>
+                        <Tag color="blue">overridden</Tag>
+                        <Text type="secondary" delete>{preview.name || '(empty)'}</Text>
+                      </Space>
+                    ) : (
+                      preview.name || <Text type="secondary">(empty)</Text>
+                    )}
+                  </Descriptions.Item>
+                </Descriptions>
+                <Paragraph
+                  type="secondary"
+                  style={{ marginTop: 8, marginBottom: 0 }}
+                  ellipsis={{ rows: 4, expandable: true, symbol: 'more' }}
+                >
+                  {preview.bio || '(no description)'}
+                </Paragraph>
+              </div>
+            </div>
+          </Card>
+        )}
+
+        {importError && (
+          <Alert
+            type="error"
+            showIcon
+            message="Import error"
+            description={importError}
+            style={{ marginTop: 12 }}
+            closable
+            onClose={() => setImportError(null)}
+          />
+        )}
       </Modal>
     </div>
   );

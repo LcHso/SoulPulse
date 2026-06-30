@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../../shared/widgets/lazy_cached_image.dart';
 import 'package:timeago/timeago.dart' as timeago;
 import '../../../core/api/api_client.dart';
 import '../../../core/theme/character_theme.dart';
@@ -150,10 +151,10 @@ class _PostCardState extends State<PostCard> {
                               ? const Color(0xFF1A1A1A)
                               : const Color(0xFFF0ECE8),
                           child: mediaUrl.isNotEmpty
-                              ? CachedNetworkImage(
+                              ? LazyCachedImage(
                                   imageUrl: mediaUrl,
                                   fit: BoxFit.cover,
-                                  placeholder: (context, url) => Center(
+                                  placeholder: (context) => Center(
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2,
                                       color: characterColors.primary

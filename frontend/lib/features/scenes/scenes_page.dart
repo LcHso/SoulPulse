@@ -1,10 +1,11 @@
-/// Scene list page for SoulPulse.
-///
-/// Displays all available (and locked) scenes for a given AI persona.
-/// Features scene cards with type badges, intimacy requirements,
-/// cost indicators, and tap-to-start functionality.
+// Scene list page for SoulPulse.
+//
+// Displays all available (and locked) scenes for a given AI persona.
+// Features scene cards with type badges, intimacy requirements,
+// cost indicators, and tap-to-start functionality.
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/api/api_client.dart';
@@ -12,10 +13,20 @@ import 'scene_models.dart';
 import 'scene_service.dart';
 import 'scene_start_dialog.dart';
 
+// ─── Providers ────────────────────────────────────────────────────────────────
+
+/// Provider for scenes list, keyed by persona ID
+final scenesProvider =
+    FutureProvider.family<List<Scene>, int>((ref, personaId) async {
+  return SceneService.getAvailableScenes(personaId);
+});
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
 /// Page showing all scenes available for a persona.
 ///
 /// Accessed from persona profile or chat menu.
-class ScenesPage extends StatefulWidget {
+class ScenesPage extends ConsumerWidget {
   final int personaId;
   final String personaName;
 
@@ -25,46 +36,7 @@ class ScenesPage extends StatefulWidget {
     required this.personaName,
   });
 
-  @override
-  State<ScenesPage> createState() => _ScenesPageState();
-}
-
-class _ScenesPageState extends State<ScenesPage> {
-  List<Scene> _scenes = [];
-  bool _loading = true;
-  String? _error;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadScenes();
-  }
-
-  Future<void> _loadScenes() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-
-    try {
-      final scenes = await SceneService.getAvailableScenes(widget.personaId);
-      if (mounted) {
-        setState(() {
-          _scenes = scenes;
-          _loading = false;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _error = '加载场景失败';
-          _loading = false;
-        });
-      }
-    }
-  }
-
-  void _onSceneTap(Scene scene) {
+  void _onSceneTap(BuildContext context, Scene scene) {
     if (!scene.isAvailable) {
       // Show lock reason
       ScaffoldMessenger.of(context).showSnackBar(
@@ -85,86 +57,88 @@ class _ScenesPageState extends State<ScenesPage> {
       context: context,
       builder: (ctx) => SceneStartDialog(
         scene: scene,
-        personaId: widget.personaId,
-        personaName: widget.personaName,
+        personaId: personaId,
+        personaName: personaName,
       ),
     );
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
+    final asyncScenes = ref.watch(scenesProvider(personaId));
 
     return Scaffold(
       appBar: AppBar(
         title: Text(
-          '${widget.personaName} · 场景',
+          '$personaName · 场景',
           style: GoogleFonts.inter(
             fontSize: 18,
             fontWeight: FontWeight.w600,
           ),
         ),
       ),
-      body: RefreshIndicator(
-        onRefresh: _loadScenes,
-        child: _buildBody(theme, isDark),
-      ),
-    );
-  }
-
-  Widget _buildBody(ThemeData theme, bool isDark) {
-    if (_loading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    if (_error != null) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.error_outline, size: 48, color: theme.colorScheme.error),
-            const SizedBox(height: 12),
-            Text(_error!, style: theme.textTheme.bodyMedium),
-            const SizedBox(height: 16),
-            TextButton(
-              onPressed: _loadScenes,
-              child: const Text('重试'),
-            ),
-          ],
+      body: asyncScenes.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, _) => Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.error_outline,
+                  size: 48, color: theme.colorScheme.error),
+              const SizedBox(height: 12),
+              Text('加载场景失败', style: theme.textTheme.bodyMedium),
+              const SizedBox(height: 16),
+              TextButton(
+                onPressed: () => ref.invalidate(scenesProvider(personaId)),
+                child: const Text('重试'),
+              ),
+            ],
+          ),
         ),
-      );
-    }
+        data: (scenes) {
+          if (scenes.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.auto_stories_outlined,
+                    size: 56,
+                    color: theme.colorScheme.primary.withOpacity(0.5),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    '暂无可用场景',
+                    style: theme.textTheme.bodyLarge?.copyWith(
+                      color:
+                          theme.colorScheme.onSurface.withOpacity(0.6),
+                    ),
+                  ),
+                ],
+              ),
+            );
+          }
 
-    if (_scenes.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.auto_stories_outlined,
-              size: 56,
-              color: theme.colorScheme.primary.withOpacity(0.5),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              '暂无可用场景',
-              style: theme.textTheme.bodyLarge?.copyWith(
-                color: theme.colorScheme.onSurface.withOpacity(0.6),
+          return RefreshIndicator(
+            onRefresh: () async {
+              ref.invalidate(scenesProvider(personaId));
+              // Wait for the provider to reload
+              await ref.read(scenesProvider(personaId).future);
+            },
+            child: ListView.builder(
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 16, vertical: 12),
+              itemCount: scenes.length,
+              itemBuilder: (context, index) => _SceneCard(
+                scene: scenes[index],
+                isDark: isDark,
+                onTap: () => _onSceneTap(context, scenes[index]),
               ),
             ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      itemCount: _scenes.length,
-      itemBuilder: (context, index) => _SceneCard(
-        scene: _scenes[index],
-        isDark: isDark,
-        onTap: () => _onSceneTap(_scenes[index]),
+          );
+        },
       ),
     );
   }
@@ -215,13 +189,15 @@ class _SceneCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   // CG preview image (if available)
-                  if (scene.sceneCgUrl != null && scene.sceneCgUrl!.isNotEmpty)
+                  if (scene.sceneCgUrl != null &&
+                      scene.sceneCgUrl!.isNotEmpty)
                     ClipRRect(
                       borderRadius: const BorderRadius.vertical(
                         top: Radius.circular(15),
                       ),
                       child: CachedNetworkImage(
-                        imageUrl: ApiClient.proxyImageUrl(scene.sceneCgUrl!),
+                        imageUrl:
+                            ApiClient.proxyImageUrl(scene.sceneCgUrl!),
                         height: 120,
                         width: double.infinity,
                         fit: BoxFit.cover,
@@ -231,7 +207,8 @@ class _SceneCard extends StatelessWidget {
                               ? const Color(0xFF1A1A2E)
                               : const Color(0xFFF5F4F0),
                         ),
-                        errorWidget: (_, __, ___) => const SizedBox.shrink(),
+                        errorWidget: (_, __, ___) =>
+                            const SizedBox.shrink(),
                       ),
                     ),
 
@@ -259,7 +236,8 @@ class _SceneCard extends StatelessWidget {
                             Expanded(
                               child: Text(
                                 scene.sceneName,
-                                style: theme.textTheme.titleMedium?.copyWith(
+                                style:
+                                    theme.textTheme.titleMedium?.copyWith(
                                   fontWeight: FontWeight.w600,
                                 ),
                                 maxLines: 1,
@@ -302,7 +280,8 @@ class _SceneCard extends StatelessWidget {
                               const SizedBox(width: 4),
                               Text(
                                 '${scene.requiredIntimacy}',
-                                style: theme.textTheme.labelSmall?.copyWith(
+                                style: theme.textTheme.labelSmall
+                                    ?.copyWith(
                                   color: theme.colorScheme.primary,
                                 ),
                               ),
@@ -326,15 +305,16 @@ class _SceneCard extends StatelessWidget {
 
                             // Cost indicator
                             if (scene.isPaid) ...[
-                              Icon(
+                              const Icon(
                                 Icons.diamond_outlined,
                                 size: 14,
-                                color: const Color(0xFFD4A84B),
+                                color: Color(0xFFD4A84B),
                               ),
                               const SizedBox(width: 4),
                               Text(
                                 '${scene.unlockCost}',
-                                style: theme.textTheme.labelSmall?.copyWith(
+                                style: theme.textTheme.labelSmall
+                                    ?.copyWith(
                                   color: const Color(0xFFD4A84B),
                                   fontWeight: FontWeight.w600,
                                 ),
@@ -348,11 +328,13 @@ class _SceneCard extends StatelessWidget {
                                 decoration: BoxDecoration(
                                   color: const Color(0xFF5B8C6A)
                                       .withOpacity(0.12),
-                                  borderRadius: BorderRadius.circular(8),
+                                  borderRadius:
+                                      BorderRadius.circular(8),
                                 ),
                                 child: Text(
                                   '免费',
-                                  style: theme.textTheme.labelSmall?.copyWith(
+                                  style: theme.textTheme.labelSmall
+                                      ?.copyWith(
                                     color: const Color(0xFF5B8C6A),
                                     fontWeight: FontWeight.w600,
                                   ),

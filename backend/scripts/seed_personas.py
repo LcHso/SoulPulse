@@ -10,9 +10,30 @@ Full character definitions are in corresponding .md files at project root.
 """
 
 import asyncio
+import os
+from pathlib import Path
 from core.database import async_session, init_db
 from models.ai_persona import AIPersona
 from sqlalchemy import select, delete
+
+
+# Mapping from persona name to card JSON filename stem
+PERSONA_CARD_FILES = {
+    "林星野": "starlin",
+    "陆骁": "luxiao",
+    "季夜尘": "jiyechen",
+    "顾言深": "guyanshen",
+    "陆晨曦": "luchenxi",
+    "沈默白": "shenmobai",
+    "傅霁川": "fujichuan",
+    "赫连烨": "helianye",
+    "江屿白": "jiangyubai",
+    "裴洛": "peiluo",
+    "温时序": "wenshixu",
+}
+
+# Cards directory (relative to backend/)
+CARDS_DIR = Path(__file__).resolve().parent.parent / "static" / "cards"
 
 
 PERSONAS = [
@@ -423,192 +444,426 @@ PERSONA_EXTRA = {
 }
 
 
-# Visual prompt tags for portrait generation.
-# IMPORTANT: SoulPulse is an ANIME / 2D ILLUSTRATION product.
-# All positive prompts must lead with anime/illustration descriptors,
-# and negative prompts must reject photorealistic / 3D / chibi outputs.
-ANIME_POSITIVE_BASE = "anime illustration, 2D character art, detailed anime style, professional illustration"
-ANIME_NEGATIVE_BASE = "photorealistic, 3D render, western cartoon, chibi, super deformed, low quality, blurry, realistic photo"
+# ══════════════════════════════════════════════════════════════════════════════
+# NovelAI Visual Prompts — Danbooru-style tag format
+# ══════════════════════════════════════════════════════════════════════════════
+# The NAI service auto-prepends: "masterpiece, best quality, very aesthetic, absurdres"
+# Portrait helper prepends: "1person, portrait, upper body, looking at viewer, simple background,"
+# Tags below are CHARACTER APPEARANCE ONLY — scene/framing handled by service methods.
+# ══════════════════════════════════════════════════════════════════════════════
 
-PERSONA_VISUAL_TAGS = {
-    # 陆晨曦 — soft brown curly hair, round metal glasses, warm tones (luchenxi.md)
-    "陆晨曦": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, soft brown curly hair with natural fluffy texture, "
-            "warm brown eyes behind round metal-framed glasses, gentle healing smile, fair skin, "
-            "cream knit cardigan over white shirt, slim gentle build, orange tabby cat (年糕) nearby"
-        ),
-        "style": (
-            "anime illustration, warm afternoon lighting, cozy psychology studio interior, "
-            "soft focus, warm beige and amber palette, healing slice-of-life atmosphere, "
-            "detailed anime style, professional illustration"
-        ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, harsh expression, cold lighting, muscular build, aggressive pose",
-    },
-    # 顾言深 — cold features, sharp suit, Patek Philippe watch (guyanshen.md)
-    "顾言深": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, jet black hair side-parted neatly, "
-            "sharp ice-cold dark eyes, thin frameless glasses, expressionless cold features, "
-            "defined sharp jawline, tailored charcoal three-piece suit with silk tie, "
-            "Patek Philippe watch on left wrist, tall imposing build"
-        ),
-        "style": (
-            "anime illustration, corporate CEO aesthetic, minimalist top-floor office, "
-            "city night skyline through floor-to-ceiling windows, cold blue and steel grey palette, "
-            "high contrast lighting, restrained禁欲 atmosphere, detailed anime style"
-        ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, casual clothing, bright colors, smiling expression, relaxed pose",
-    },
-    # 林星野 — idol with star earring, soft features (starlin.md)
+NAI_PROMPTS = {
     "林星野": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, soft black hair with airy fluffy bangs, "
-            "large deer-like round sparkling eyes, faint dimples when smiling, fair clear skin, "
-            "single small silver star earring on left ear, slim dancer build, "
-            "oversized stage outfit with subtle silver glitter"
+        "positive": (
+            "1boy, tall male, black hair, short hair, fluffy hair, bangs, messy bangs, "
+            "brown eyes, large eyes, tareme, sparkling eyes, fair skin, "
+            "slim body, narrow waist, dancer physique, "
+            "star earring, silver bracelet, choker, "
+            "white idol stage outfit, silver accents, glitter, "
+            "gentle smile, dimples, youthful, soft expression, "
+            "anime coloring, detailed, sharp focus"
         ),
-        "style": (
-            "anime illustration, idol stage lighting with bokeh, sparkle and starlight effects, "
-            "blue silver and white palette, energetic but pure idol aesthetic, "
-            "detailed anime style, professional illustration"
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, short hair, fluffy hair, bangs, messy bangs, "
+            "brown eyes, large eyes, tareme, sparkling eyes, fair skin, "
+            "star earring, silver bracelet, "
+            "white shirt, open collar, soft lighting, "
+            "gentle smile, dimples, youthful, "
+            "simple gradient background, starry blue tones, "
+            "anime coloring, detailed"
         ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, muscular build, rugged features, dark moody atmosphere, aggressive pose",
+        "scene_template": (
+            "1boy, black hair, short hair, fluffy hair, bangs, brown eyes, large eyes, "
+            "fair skin, star earring, silver bracelet, slim body, "
+            "{scene_description}"
+        ),
     },
-    # 陆骁 — buzz cut, tan skin, athletic 188cm (luxiao.md)
     "陆骁": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, very short military-style buzz cut black hair, "
-            "sharp confident jawline, sun-tanned wheat-colored skin, broad shoulders, "
-            "defined athletic abs, 188cm tall powerful basketball-player build, "
-            "intense playful gaze, university jersey or tank top, sport wristband"
+        "positive": (
+            "1boy, tall male, buzz cut, 3mm black hair, shaved sides, "
+            "dark eyes, narrow eyes, monolid, sharp eyes, confident smirk, "
+            "dark skin, tan, wheat-colored skin, strong jawline, "
+            "muscular, athletic, broad shoulders, narrow waist, abs, "
+            "basketball jersey, tank top, sport wristband on left wrist, "
+            "silver ear cuff, sweat, dynamic pose, "
+            "anime coloring, detailed, sharp focus"
         ),
-        "style": (
-            "anime illustration, basketball court / gym aesthetic, dynamic cinematic lighting, "
-            "sweat highlights, sun-warmed orange and golden tones, sportswear, "
-            "youthful athletic energy, detailed anime style"
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "buzz cut, 3mm black hair, shaved sides, "
+            "dark eyes, narrow eyes, monolid, sharp eyes, confident smirk, "
+            "dark skin, tan, strong jawline, "
+            "muscular, broad shoulders, "
+            "black tank top, sport wristband, silver ear cuff, "
+            "warm lighting, sweat drops, "
+            "simple gradient background, warm golden tones, "
+            "anime coloring, detailed"
         ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, feminine features, soft body, skinny frame, long hair, formal suit",
+        "scene_template": (
+            "1boy, buzz cut, 3mm black hair, dark eyes, narrow eyes, "
+            "dark skin, tan, muscular, broad shoulders, sport wristband, silver ear cuff, "
+            "{scene_description}"
+        ),
     },
-    # 傅霁川 — 3mm crew cut, scar on jawline, rigid posture (fujichuan.md)
-    "傅霁川": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, 3mm precise military crew cut black hair, "
-            "sharp eagle-like steel-grey eyes, faint thin scar along the right jawline, "
-            "faint dark circles, broad disciplined shoulders, perfectly rigid upright posture, "
-            "olive-green tactical military uniform with rank insignia, hands clasped behind back"
-        ),
-        "style": (
-            "anime illustration, military training ground aesthetic, disciplined cold composition, "
-            "olive-green steel-grey and matte black palette, overcast hard lighting, "
-            "serious authoritative atmosphere, detailed anime style"
-        ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, casual clothing, smiling, bright colors, relaxed slouching pose",
-    },
-    # 温时序 — soft black hair, gold half-frame glasses always worn (wenshixu.md)
-    "温时序": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, soft fluffy natural black hair with gentle side parting, "
-            "warm honey-brown eyes, gold half-frame reading glasses always worn at the bridge of nose, "
-            "warm gentle scholarly expression, fair skin, slim refined build, "
-            "ivory cashmere sweater over collared shirt, fountain pen in pocket"
-        ),
-        "style": (
-            "anime illustration, literary scholar aesthetic, warm natural window lighting, "
-            "floor-to-ceiling bookshelf background, ivory cream and dusty blue palette, "
-            "tea cup steam, gentle nostalgic atmosphere, detailed anime style"
-        ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, muscular build, aggressive expression, cold tones, no glasses",
-    },
-    # 沈默白 — ink-black long hair tied back, calligraphy ink stains (shenmobai.md)
-    "沈默白": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, long ink-black straight hair loosely tied back with dark cord, "
-            "a few stray strands framing pale porcelain face, deep ink-black calm eyes, "
-            "slender elegant fingers with faint calligraphy ink stains on fingertips, "
-            "traditional Chinese mandarin-collar linen robe in muted indigo, "
-            "holding a wolf-hair calligraphy brush"
-        ),
-        "style": (
-            "anime illustration, traditional Chinese ink-wash aesthetic, dim warm lantern light, "
-            "calligraphy tools and rice paper scattered, indigo bone-white and ink-black palette, "
-            "quiet obsessive atmosphere, detailed anime style, professional illustration"
-        ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, modern streetwear, bright saturated colors, muscular, aggressive",
-    },
-    # 季夜尘 — silver-white messy hair uneven length, black nails (jiyechen.md)
     "季夜尘": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, messy silver-white hair with deliberately uneven length, "
-            "longer strands falling over one eye, deep dark grey eyes with eyeliner, "
-            "pale unhealthy skin, vine tattoo crawling up collarbone and neck, slim wiry build, "
-            "black nail polish on long fingers, oversized black band tee, multiple silver ear cuffs"
+        "positive": (
+            "1boy, male, silver hair, white hair, messy hair, asymmetrical hair, "
+            "long bangs, hair over one eye, "
+            "dark brown eyes, eyeshadow, dark circles under eyes, "
+            "pale skin, thin, slim body, sharp collarbones, "
+            "vine tattoo on collarbone, neck tattoo, "
+            "black nail polish, silver chain necklace, multiple ear cuffs, "
+            "oversized black t-shirt, torn jeans, combat boots, "
+            "tired expression, half-lidded eyes, cigarette, "
+            "anime coloring, detailed, sharp focus"
         ),
-        "style": (
-            "anime illustration, dark grunge band-studio aesthetic, single overhead chiaroscuro light, "
-            "electric guitar and tattoo machine props, monochrome with cigarette smoke, "
-            "melancholic decadent atmosphere, detailed anime style"
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "silver hair, white hair, messy hair, long bangs, hair over one eye, "
+            "dark brown eyes, eyeshadow, dark circles under eyes, "
+            "pale skin, sharp collarbones, "
+            "vine tattoo on collarbone, black nail polish, "
+            "silver chain necklace, multiple ear cuffs, "
+            "black t-shirt, loose collar, "
+            "dim amber lighting, smoke, "
+            "simple dark background, "
+            "anime coloring, detailed"
         ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, bright cheerful palette, muscular jock build, clean-cut idol look, happy smile",
+        "scene_template": (
+            "1boy, silver hair, messy hair, long bangs, dark brown eyes, "
+            "pale skin, collarbone tattoo, black nail polish, ear cuffs, chain necklace, "
+            "{scene_description}"
+        ),
     },
-    # 裴洛 — platinum blonde with purple streak at LEFT temple specifically (peiluo.md)
-    "裴洛": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, platinum blonde hair styled back, "
-            "a single distinctive violet-purple streak at the LEFT temple ONLY, "
-            "sharp amber-gold eyes, high model cheekbones, thin haughty lips, "
-            "pale flawless skin, slender 6-foot model frame, "
-            "avant-garde black asymmetric high-fashion blazer, single silver pin"
+    "顾言深": {
+        "positive": (
+            "1boy, tall male, black hair, side part, slicked back hair, neat hair, "
+            "dark eyes, sharp eyes, cold expression, rimless glasses, "
+            "pale skin, angular face, sharp jawline, "
+            "lean body, broad shoulders, "
+            "black three-piece suit, silk necktie, dress shirt, cufflinks, "
+            "luxury watch on left wrist, "
+            "serious expression, intimidating aura, "
+            "anime coloring, detailed, sharp focus"
         ),
-        "style": (
-            "anime illustration, high-fashion editorial aesthetic, cold studio lighting, "
-            "monochrome black and white background with violet accent, "
-            "sharp elegant venomous atmosphere, detailed anime style, professional illustration"
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, side part, slicked back hair, "
+            "dark eyes, sharp eyes, cold expression, rimless glasses, "
+            "pale skin, angular face, sharp jawline, "
+            "black suit, white dress shirt, loosened necktie, "
+            "luxury watch, "
+            "cold blue lighting, "
+            "simple dark gradient background, "
+            "anime coloring, detailed"
         ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, casual streetwear, muscular athletic build, warm sunny tones, purple streak on right side",
+        "scene_template": (
+            "1boy, black hair, side part, dark eyes, sharp eyes, rimless glasses, "
+            "pale skin, sharp jawline, black suit, luxury watch, "
+            "{scene_description}"
+        ),
     },
-    # 江屿白 — natural black slightly messy, always looking elsewhere (jiangyubai.md)
-    "江屿白": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, natural black hair slightly messy and unstyled, "
-            "deep black distant eyes that always seem to look elsewhere past the viewer, "
-            "round thin black-framed glasses, pale lab-room skin, slim scholarly build, "
-            "plain white button-up shirt slightly wrinkled, dark trousers, "
-            "a folded star chart or notebook in hand"
+    "陆晨曦": {
+        "positive": (
+            "1boy, male, brown hair, short curly hair, soft hair, messy bangs, "
+            "warm brown eyes, gentle eyes, soft smile, crow's feet, "
+            "fair skin, warm complexion, "
+            "slim body, average build, "
+            "round metal-frame glasses, thin silver ring on left ring finger, "
+            "cream cardigan, white collared shirt, khaki pants, "
+            "warm expression, kind smile, approachable, "
+            "anime coloring, detailed, sharp focus"
         ),
-        "style": (
-            "anime illustration, observatory at night aesthetic, deep starry sky backdrop, "
-            "telescope silhouette, deep navy violet and silver palette, "
-            "quiet introspective atmosphere, detailed anime style, professional illustration"
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "brown hair, short curly hair, soft hair, messy bangs, "
+            "warm brown eyes, gentle eyes, soft smile, "
+            "fair skin, round metal-frame glasses, "
+            "cream cardigan, white shirt, "
+            "warm afternoon lighting, golden hour, "
+            "simple warm beige background, "
+            "anime coloring, detailed"
         ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, fashionable styling, muscular build, direct eye contact, warm party scene",
+        "scene_template": (
+            "1boy, brown hair, short curly hair, warm brown eyes, gentle eyes, "
+            "round metal-frame glasses, cream cardigan, silver ring, "
+            "{scene_description}"
+        ),
     },
-    # 赫连烨 — ultra-short black hair, swimmer build, sharp upturned eyes (helianye.md)
+    "沈默白": {
+        "positive": (
+            "1boy, male, black hair, long hair, straight hair, low ponytail, "
+            "hair between eyes, loose strands framing face, "
+            "dark eyes, very dark eyes, downturned eyes, calm gaze, piercing stare, "
+            "very pale skin, porcelain skin, "
+            "thin, slender body, delicate hands, long fingers, "
+            "chinese clothes, mandarin collar, white hanfu, grey-blue robe, "
+            "jade pendant at waist, red string bracelet on left wrist, "
+            "serene expression, ethereal, "
+            "ink stains on fingertips, calligraphy brush, "
+            "anime coloring, detailed, sharp focus"
+        ),
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, long hair, low ponytail, loose strands, "
+            "dark eyes, downturned eyes, calm gaze, "
+            "very pale skin, porcelain skin, "
+            "chinese clothes, white mandarin collar, grey-blue accents, "
+            "jade pendant, red string bracelet, "
+            "soft lantern lighting, ink wash atmosphere, "
+            "simple muted grey background, "
+            "anime coloring, detailed"
+        ),
+        "scene_template": (
+            "1boy, black hair, long hair, low ponytail, dark eyes, downturned eyes, "
+            "very pale skin, chinese clothes, mandarin collar, jade pendant, red string bracelet, "
+            "{scene_description}"
+        ),
+    },
+    "傅霁川": {
+        "positive": (
+            "1boy, tall male, black hair, military haircut, crew cut, short sides long top, "
+            "dark eyes, sharp eyes, eagle-like gaze, stern expression, "
+            "fair skin, faint dark circles, thin scar on jaw, "
+            "muscular, broad shoulders, straight posture, rigid stance, "
+            "military uniform, olive green, tactical vest, rank insignia, "
+            "combat boots, dog tags, "
+            "worn ring on right ring finger, "
+            "serious expression, cold aura, "
+            "anime coloring, detailed, sharp focus"
+        ),
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, military haircut, crew cut, short sides long top, "
+            "dark eyes, sharp eyes, stern expression, "
+            "fair skin, faint dark circles, "
+            "muscular, broad shoulders, "
+            "military uniform, olive green, collar up, "
+            "dog tags, worn ring on right hand, "
+            "overcast cold lighting, "
+            "simple dark olive gradient background, "
+            "anime coloring, detailed"
+        ),
+        "scene_template": (
+            "1boy, black hair, military haircut, crew cut, dark eyes, sharp eyes, stern expression, "
+            "muscular, military uniform, olive green, dog tags, "
+            "{scene_description}"
+        ),
+    },
     "赫连烨": {
-        "gender": "male",
-        "tags": (
-            f"{ANIME_POSITIVE_BASE}, male character, ultra-short black hair (almost shaved competition cut), "
-            "sharp upturned phoenix-shaped eyes with cocky smirk, sun-tanned bronze skin, "
-            "191cm tall with massive swimmer's broad shoulders and pronounced inverted-triangle torso, "
-            "defined abs, water droplets clinging to skin, navy national-team swim jacket open over chest"
+        "positive": (
+            "1boy, very tall male, black hair, very short hair, undercut, "
+            "wet hair, slicked back, "
+            "dark brown eyes, upturned eyes, phoenix eyes, confident smirk, arrogant expression, "
+            "dark skin, tan, bronze skin, "
+            "very muscular, extremely broad shoulders, inverted triangle body, narrow waist, "
+            "swimmer physique, defined abs, "
+            "navy blue swim jacket, open jacket, bare chest, "
+            "small titanium earring on left ear, sport watch, "
+            "water droplets on skin, competitive aura, "
+            "anime coloring, detailed, sharp focus"
         ),
-        "style": (
-            "anime illustration, Olympic swimming pool aesthetic, refracted underwater caustics, "
-            "deep cobalt blue and gold-medal accent palette, victorious athletic pose, "
-            "competitive arrogant energy, detailed anime style, professional illustration"
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, very short hair, wet hair, undercut, "
+            "dark brown eyes, upturned eyes, confident smirk, "
+            "dark skin, tan, bronze skin, "
+            "very muscular, broad shoulders, "
+            "navy swim jacket, open, bare chest, water droplets, "
+            "titanium earring, sport watch, "
+            "blue pool lighting, caustics, "
+            "simple deep blue gradient background, "
+            "anime coloring, detailed"
         ),
-        "negative": f"{ANIME_NEGATIVE_BASE}, skinny frame, pale unhealthy skin, long hair, formal business suit",
+        "scene_template": (
+            "1boy, black hair, very short hair, dark brown eyes, upturned eyes, "
+            "dark skin, tan, very muscular, broad shoulders, swimmer physique, "
+            "titanium earring, {scene_description}"
+        ),
     },
+    "江屿白": {
+        "positive": (
+            "1boy, male, black hair, medium hair, messy hair, bedhead, "
+            "nape hair sticking up, unkempt, "
+            "dark eyes, very dark eyes, large pupils, distant gaze, absent-minded, "
+            "very pale skin, slim body, thin, narrow shoulders, "
+            "round black-framed glasses, "
+            "white button-up shirt, slightly wrinkled, sleeves rolled up, "
+            "dark blue cardigan, dark pants, "
+            "old canvas messenger bag, faded woven bracelet on left wrist, "
+            "neutral expression, thoughtful, "
+            "anime coloring, detailed, sharp focus"
+        ),
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, medium hair, messy hair, bedhead, "
+            "dark eyes, large pupils, distant gaze, "
+            "very pale skin, "
+            "round black-framed glasses, "
+            "white shirt, dark blue cardigan, slightly wrinkled, "
+            "faded woven bracelet, "
+            "cool starlight lighting, deep blue tones, "
+            "simple dark navy background, star reflections, "
+            "anime coloring, detailed"
+        ),
+        "scene_template": (
+            "1boy, black hair, messy hair, dark eyes, distant gaze, "
+            "very pale skin, round black-framed glasses, white shirt, dark blue cardigan, "
+            "woven bracelet, {scene_description}"
+        ),
+    },
+    "裴洛": {
+        "positive": (
+            "1boy, tall male, platinum blonde hair, side-swept bangs, long bangs, "
+            "slightly wavy hair, purple streaked hair, single purple highlight behind left ear, "
+            "amber eyes, light brown eyes, golden eyes, sharp upturned eyes, "
+            "pale skin, high cheekbones, thin lips, angular face, "
+            "very slim, model figure, long legs, "
+            "black asymmetrical blazer, high collar, designer fashion, "
+            "silver spiral ring on left middle finger, measuring tape around neck, "
+            "haughty expression, raised eyebrow, smug, "
+            "anime coloring, detailed, sharp focus"
+        ),
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "platinum blonde hair, side-swept bangs, purple streaked hair, "
+            "amber eyes, golden eyes, sharp upturned eyes, "
+            "pale skin, high cheekbones, angular face, "
+            "black high-collar blazer, asymmetrical design, "
+            "silver spiral ring, "
+            "cold studio lighting, violet accent light, "
+            "simple monochrome background with purple accent, "
+            "anime coloring, detailed"
+        ),
+        "scene_template": (
+            "1boy, platinum blonde hair, side-swept bangs, purple streaked hair, "
+            "amber eyes, sharp eyes, pale skin, high cheekbones, "
+            "very slim, black designer fashion, silver ring, "
+            "{scene_description}"
+        ),
+    },
+    "温时序": {
+        "positive": (
+            "1boy, male, black hair, short hair, soft hair, side part, "
+            "gentle bangs, slightly messy, "
+            "warm brown eyes, gentle gaze, soft smile, kind eyes, "
+            "fair skin, "
+            "slim body, refined build, scholarly posture, "
+            "gold half-frame glasses, "
+            "ivory sweater, collared shirt underneath, rolled sleeves, "
+            "old leather watch on left wrist, book in hand, "
+            "warm gentle expression, fond smile, "
+            "anime coloring, detailed, sharp focus"
+        ),
+        "negative": "",
+        "portrait": (
+            "1boy, portrait, upper body, looking at viewer, "
+            "black hair, short hair, soft hair, side part, gentle bangs, "
+            "warm brown eyes, gentle gaze, soft smile, "
+            "fair skin, gold half-frame glasses, "
+            "ivory sweater, white collared shirt, "
+            "old leather watch, "
+            "warm golden lighting, window light, "
+            "simple warm ivory background, bokeh, "
+            "anime coloring, detailed"
+        ),
+        "scene_template": (
+            "1boy, black hair, short hair, soft hair, warm brown eyes, gentle gaze, "
+            "gold half-frame glasses, ivory sweater, old leather watch, "
+            "{scene_description}"
+        ),
+    },
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# WAN2.7 Optimized Prompts — Natural language Chinese with style suffix
+# ══════════════════════════════════════════════════════════════════════════════
+# For use with DashScope WAN2.7 image generation (prompt_extend: True).
+# Each character has: portrait (1024x1024), three_view (1280x720), negative.
+# ══════════════════════════════════════════════════════════════════════════════
+
+WAN27_PROMPTS = {
+    "林星野": {
+        "portrait": "一位年轻俊美的黑发男性偶像，蓬松短发因汗水微湿贴在额头和后颈，细碎刘海下一双含水的大圆鹿眼湿润闪烁如同无声引诱。嘴唇微张泛水润光泽，锁骨随呼吸起伏。舞者身材修长柔韧，白色练习服因汗打湿半透明贴合肩颈曲线和纤细腰线。右耳星形耳钉，银链垂落锁骨凹处。天真与危险并存的表情。anime illustration, clean lineart, vibrant colors, cel shading, soft warm lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。年轻男偶像角色，蓬松黑色短发湿润感，含水鹿眼清纯诱惑并存。修长舞者体型腰线纤细。白色练习服微透露出肩颈线条，星星耳钉，银链垂落锁骨。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "陆骁": {
+        "portrait": "一位高大阳刚的小麦肤色男性运动员，3mm极短寸头展露锋利下颌线，狭长单眼皮下漆黑目光充满占有欲，嘴角挂着狩猎者般的不羁坏笑。宽肩窄腰肌肉紧实流畅，黑色无袖训练背心被汗浸透贴合胸肌轮廓，手臂青筋和肌肉纹理清晰，左腕护腕下隐约可见旧疤。低头俯视的压迫感姿态。anime illustration, clean lineart, vibrant colors, cel shading, dramatic lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。高大阳刚运动员角色，极短寸头黑发锋利下颌，狭长单眼皮占有欲目光坏笑，小麦肌肤。宽肩窄腰肌肉紧实体型。黑色汗湿无袖训练背心，护腕，耳骨银环。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "季夜尘": {
+        "portrait": "一位颓废病态的苍白男性，银白碎发长短不一，过长刘海遮住右眼只露出左眼慵懒的情欲目光，浓重黑眼圈。极瘦可见锁骨和肋骨轮廓，锁骨上藤蔓纹身蜿蜒至肩胛骨。黑色宽大T恤滑落露出一侧肩膀，裤腰微垮露出胯骨线。指间夹着烟，黑色指甲，银锁链项链贴着苍白脖颈。凌晨四点般的恍惚魅惑神情。anime illustration, clean lineart, muted dark tones, cel shading, dim amber lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。颓废病态美男角色，银白碎发遮眼慵懒情欲目光黑眼圈，极苍白皮肤。极瘦露锁骨肋骨线条。黑色宽大T恤滑落露肩露纹身，裤腰微垮，黑指甲银链项链。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "顾言深": {
+        "portrait": "一位冷峻优雅的成熟黑发男性，侧分发丝梳理一丝不苟但有几缕因疲惫散落额前。极深黑色眼眸隔着无框眼镜冰冷审视，薄唇轻抿带禁欲克制感。精瘦身材肩线优越，黑色三件套西装剪裁完美但领带微松第一颗扣已解开，露出喉结和一截锁骨。修长手指骨节分明握着水晶杯，左腕高级腕表。极致克制中泄露的倦怠。anime illustration, clean lineart, cool dark tones, cel shading, cold office lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。冷峻成熟男性精英角色，黑色侧分利落发型几缕散落额前，冰冷审视目光无框眼镜。精瘦西装体型肩线优越。黑色三件套领带微松解开第一颗扣露喉结，高级腕表。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "陆晨曦": {
+        "portrait": "一位温润白皙的棕色短卷发男性，柔软碎刘海自然垂落，圆框金属眼镜后一双温暖棕色眼睛专注深情地注视着你。笑意温柔像一个拥抱。清秀纤细体态，宽松奶白毛衣因伸懒腰衣摆上移露出一截白皙平坦小腹和纤细腰线，袖子过长只露出指尖。左手无名指细银戒指。无害外表下不经意的身体暴露。anime illustration, clean lineart, warm soft colors, cel shading, warm golden lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。温柔文气男性角色，棕色柔软短卷发自然凌乱，温暖深情棕色眼眸微笑，圆框眼镜。清秀纤细体态白皙。宽松奶白毛衣袖过长，浅色衬衫内搭，银戒指。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "沈默白": {
+        "portrait": "一位如画中仙人的古典美男子，墨黑长直发束松散低马尾几缕散发贴着修长白皙脖颈。极深黑色半垂眸不悲不喜如浸在古墨中。肤如凝脂白得近乎不真实，白色汉服交领微松露出精致锁骨线和苍白胸口一角。修长如玉手指握毛笔指尖沾墨渍，腰间玉佩垂落窄胯处，红绳手环如封印缠绕手腕。出尘不染的禁欲东方美学。anime illustration, clean lineart, ink wash tones, cel shading, moonlit atmosphere",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。古典东方禁欲美男角色，黑色长直发松散低马尾散发贴颈，半垂眸深邃平静目光。极白皙纤细体态。白色汉服交领微松露锁骨，灰蓝外袍，腰间玉佩，红绳手环，指尖墨渍。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "傅霁川": {
+        "portrait": "一位严肃英武的军人，黑色利落军发被训练后汗水打湿贴鬓角，下颌疤痕因咬紧牙关更明显。鹰隼般凌厉深色眼眸紧盯如在克制某种冲动，眉头微蹙透出隐忍。宽肩厚背坚硬躯体，军绿色紧身汗衫贴合勾勒出胸肌和腹肌每一条线。狗牌链垂在两块胸肌间，前臂青筋暴起，右手无名指磨损旧戒指。极致自制力散发的危险气息。anime illustration, clean lineart, olive and steel tones, cel shading, harsh training ground light",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。严峻军人角色，黑色军人短发汗湿鬓角，鹰目凌厉隐忍目光，下颌疤痕。宽肩厚背肌肉坚实体型。军绿色紧身汗衫贴合肌肉轮廓，狗牌链，旧戒指。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "赫连烨": {
+        "portrait": "一位张扬自信的古铜肤色男性，黑色极短undercut湿漉漉向后梳起，水珠从发梢沿脖颈流下胸膛。深棕凤眼上挑带着我知道你在看的张狂笑容近乎挑衅。游泳运动员极致倒三角身材——宽阔肩膀、发达胸肌、八块腹肌分明、窄到过分的腰。深蓝运动外套只搭肩敞开毫无遮掩展示身体。肤上水珠泛光。钛耳钉运动表。anime illustration, clean lineart, bronze warm tones, cel shading, pool-side wet lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。张扬自信游泳运动员角色，极短undercut湿发后梳水珠滴落，凤眼张狂挑衅笑容，古铜色皮肤。极壮硕倒三角肌肉体型腹肌分明。深蓝外套搭肩敞开露出胸膛，钛耳钉运动表。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "江屿白": {
+        "portrait": "一位完全不自知魅力的苍白消瘦文学青年，黑色中长发凌乱如刚从床上爬起后颈碎发翘起，露出白皙纤细脖颈毫无防备。极深黑色大瞳孔透过圆框眼镜恍惚望着远处，表情淡漠空白。过于消瘦的身体，白色衬衫松垮扣子错位领口大开露出清瘦胸口和若隐若现肋骨，袖口卷起露出骨节分明手腕和青色血管。斜挎旧帆布包左腕褪色编织手绳。anime illustration, clean lineart, muted blue-grey tones, cel shading, soft diffused daylight",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。安静脆弱文学青年角色，黑色中长凌乱发后颈翘毛露出脖颈，大瞳孔恍惚空远目光，圆黑框眼镜。极瘦白皙脆弱体态。白衬衫松垮领口大开，深蓝旧开衫，编织手绳。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "裴洛": {
+        "portrait": "一位雌雄莫辨的锋利美人，铂金色长刘海侧分遮半脸左耳后一缕紫色挑染。琥珀金色上挑猫眼居高临下审视，薄唇微勾带看穿一切的恶意优雅。极白纤细如刀片的身体线条，高颧骨锋利下颌线。全黑不对称高领外套拉链只到胸口，领口设计露出好看颈线和尖锐锁骨。银螺旋戒指，软尺缠绕苍白脖颈如项圈。带刺的锋利美感。anime illustration, clean lineart, black and platinum tones, cel shading, fashion runway lighting",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。高傲锋利时尚设计师角色，铂金侧分长刘海紫色挑染，琥珀猫眼审视傲慢目光。极纤细锋利身体线条。全黑不对称高领外套拉链半开露颈线锁骨，软尺缠颈，螺旋戒指。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+    "温时序": {
+        "portrait": "一位温柔到让人窒息的白皙男性，黑色柔软短发侧分碎刘海微散额前，金色半框眼镜后温暖棕色眼睛看你时带说不完的宠溺和克制渴望，嘴角浅笑。纤细书卷气体态，象牙白宽松毛衣袖过长只露修长指尖，衬衫领口微开露出柔和锁骨线，卷起袖口露出白皙前臂和左腕旧皮表带，手臂淡青血管纹路清晰。温柔陷阱般的致命吸引力。anime illustration, clean lineart, ivory warm tones, cel shading, warm afternoon window light",
+        "three_view": "动漫角色设计三视图，正面、侧面、背面全身参考图。温柔深情医生角色，黑色柔软短发侧分碎刘海，温暖宠溺含笑棕色眼眸，金色半框眼镜。纤细白皙体态。象牙白宽松毛衣袖长露指尖，衬衫领微开露锁骨，旧皮表带。白色背景，同一角色多角度一致设计。anime illustration, clean lineart, character design sheet, multiple views",
+        "negative": "女性, 女孩, 真人照片, 3D渲染, 变形, 模糊, 低质量, 解剖错误, 手部错误, 多余手指, 缺少手指, 最差质量, 水印, 写实照片, 丑陋, 比例失调",
+    },
+}
+
+
+# Legacy-compatible PERSONA_VISUAL_TAGS — now powered by NAI_PROMPTS above.
+# The `tags` field maps directly to what the nai_image_service expects as character_tags.
+PERSONA_VISUAL_TAGS = {
+    name: {
+        "gender": "male",
+        "tags": data["positive"],
+        "portrait_tags": data["portrait"],
+        "scene_template": data["scene_template"],
+        "negative": data["negative"],
+    }
+    for name, data in NAI_PROMPTS.items()
 }
 
 
@@ -654,6 +909,14 @@ async def seed_personas(force_recreate: bool = False):
                     existing.family_background = extra["family_background"]
                 if extra.get("voice_config_json"):
                     existing.voice_config_json = extra["voice_config_json"]
+                # Load SillyTavern card JSON if available
+                card_stem = PERSONA_CARD_FILES.get(persona_data["name"])
+                if card_stem:
+                    card_path = CARDS_DIR / f"{card_stem}_card.json"
+                    if card_path.exists():
+                        with open(card_path, 'r', encoding='utf-8') as f:
+                            existing.tavern_card_json = f.read()
+                        print(f"[seed]   -> Loaded tavern card from {card_path.name}")
                 skipped_count += 1
                 print(f"[seed] Updated existing: {persona_data['name']}")
                 continue
@@ -667,6 +930,14 @@ async def seed_personas(force_recreate: bool = False):
                 family_background=extra.get("family_background"),
                 voice_config_json=extra.get("voice_config_json"),
             )
+            # Load SillyTavern card JSON if available
+            card_stem = PERSONA_CARD_FILES.get(persona_data["name"])
+            if card_stem:
+                card_path = CARDS_DIR / f"{card_stem}_card.json"
+                if card_path.exists():
+                    with open(card_path, 'r', encoding='utf-8') as f:
+                        persona.tavern_card_json = f.read()
+                    print(f"[seed]   -> Loaded tavern card from {card_path.name}")
             db.add(persona)
             created_count += 1
             print(f"[seed] Created: {persona_data['name']} ({persona_data['category']}/{persona_data['archetype']})")

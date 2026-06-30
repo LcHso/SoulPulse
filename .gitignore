@@ -9,6 +9,10 @@ build/
 # Environment & secrets
 .env
 .env.production
+.env.test
+backend/.env
+backend/.env.production
+backend/.env.test
 *.db
 *.db-journal
 *.db-shm
@@ -16,7 +20,9 @@ build/
 
 # Deployment data
 data/
+data-test/
 certbot/
+certbot/conf/
 
 # Vector DB data
 chroma_data/

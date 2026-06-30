@@ -1,9 +1,13 @@
-"""Regenerate base portraits + avatars for all AI personas using latest model.
+"""Regenerate base portraits + avatars for all AI personas.
+
+Dispatches to the configured image backend:
+  * IMAGE_BACKEND=nai       -> delegates to scripts.generate_nai_portraits
+  * IMAGE_BACKEND=dashscope -> uses the legacy DashScope generator
 
 This script:
 1. Auto-adds missing columns (base_face_url, visual_prompt_tags, visual_description)
 2. Generates a high-quality base portrait for each persona
-3. Downloads the image to local static storage
+3. Persists the image to local static storage
 4. Updates both base_face_url and avatar_url in the database
 
 Run from the backend directory:
@@ -20,80 +24,13 @@ sys.path.insert(0, ".")
 
 from sqlalchemy import select, text
 
+from core.config import settings
 from core.database import init_db, async_session
 from models.ai_persona import AIPersona
 from services.image_gen_service import generate_base_portrait, download_to_static
 
-# Visual Identity definitions for each persona (anime/2D illustration style)
-# Style benchmark: Genshin Impact / Love and Deepspace 2D anime art
-PERSONA_VISUAL_TAGS = {
-    "Ethan": {
-        "gender": "male",
-        "tags": "light brown tousled hair, hazel eyes, warm charming smile, defined cheekbones, clean shaven, youthful face, bishounen",
-        "style": "anime illustration, golden hour anime aesthetic, cel shading",
-    },
-    "陆晨曦": {
-        "gender": "male",
-        "tags": "long brown wavy hair, gentle eyes, warm smile, soft features, bishounen, otome game protagonist",
-        "style": "anime illustration, soft dreamy anime aesthetic, cel shading",
-    },
-    "顾言深": {
-        "gender": "male",
-        "tags": "short black hair, sharp jawline, deep dark eyes, serious expression, clean shaven, bishounen, cool male lead",
-        "style": "anime illustration, minimalist dark anime aesthetic, cel shading",
-    },
-    "林屿": {
-        "gender": "male",
-        "tags": "short sporty hair, bright energetic eyes, warm smile, athletic build, youthful bishounen",
-        "style": "anime illustration, bright youthful anime aesthetic, cel shading",
-    },
-    "沈默白": {
-        "gender": "male",
-        "tags": "slightly long messy black hair, mysterious dark eyes, pale complexion, elegant bishounen features, hanfu styling",
-        "style": "anime illustration, traditional Chinese anime aesthetic, cel shading",
-    },
-    "林星野": {
-        "gender": "male",
-        "tags": "soft textured black hair, bright expressive eyes, gentle dimple smile, slim narrow face with sharp chin, fair skin, 21 year old anime male idol, slim build, wearing casual white hoodie with star print, bishounen",
-        "style": "anime illustration, Chinese anime idol aesthetic, soft anime lighting, cel shading",
-    },
-    "陆骁": {
-        "gender": "male",
-        "tags": "buzz cut, sharp jawline, tanned skin, broad shoulders, defined abs, athletic muscular build, intense gaze, anime ikemen",
-        "style": "anime illustration, gym anime aesthetic, dramatic anime lighting, cel shading, muscular character design",
-        "negative": "photorealistic, 3D render, realistic photo, feminine, soft, skinny, long hair, loose clothing, blurry",
-    },
-    "傅霁川": {
-        "gender": "male",
-        "tags": "3mm precise military crew cut black hair, sharp eagle-like steel-grey eyes, faint thin scar along the right jawline, faint dark circles, broad disciplined shoulders, perfectly rigid upright posture, olive-green tactical military uniform with rank insignia, hands clasped behind back, bishounen ikemen",
-        "style": "anime illustration, military drama anime aesthetic, dramatic anime lighting, cel shading",
-    },
-    "温时序": {
-        "gender": "male",
-        "tags": "soft fluffy natural black hair with gentle side parting, warm honey-brown eyes, gold half-frame reading glasses at the bridge of nose, warm gentle scholarly expression, fair skin, slim refined build, ivory cashmere sweater over collared shirt, fountain pen in pocket, bishounen",
-        "style": "anime illustration, warm scholarly anime aesthetic, soft library lighting, cel shading",
-    },
-    "季夜尘": {
-        "gender": "male",
-        "tags": "messy silver-white hair with deliberately uneven length, longer strands falling over one eye, deep dark grey eyes with eyeliner, pale unhealthy skin, vine tattoo crawling up collarbone and neck, slim wiry build, black nail polish on long fingers, oversized black band tee, multiple silver ear cuffs, bishounen rocker",
-        "style": "anime illustration, dark rock anime aesthetic, moody anime lighting, cel shading",
-    },
-    "裴洛": {
-        "gender": "male",
-        "tags": "platinum blonde hair styled back, a single distinctive violet-purple streak at the LEFT temple ONLY, sharp amber-gold eyes, high model cheekbones, thin haughty lips, pale flawless skin, slender tall model frame, avant-garde black asymmetric high-fashion blazer, single silver pin, bishounen",
-        "style": "anime illustration, high-fashion runway anime aesthetic, sharp dramatic lighting, cel shading",
-    },
-    "江屿白": {
-        "gender": "male",
-        "tags": "natural black hair slightly messy and unstyled, deep black distant eyes that always seem to look past the viewer, round thin black-framed glasses, pale lab-room skin, slim scholarly build, plain white button-up shirt slightly wrinkled, dark trousers, holding a folded star chart, bishounen",
-        "style": "anime illustration, quiet astronomy anime aesthetic, soft starlight lighting, cel shading",
-    },
-    "赫连烨": {
-        "gender": "male",
-        "tags": "ultra-short black hair (almost shaved competition cut), sharp upturned phoenix-shaped eyes with cocky smirk, sun-tanned bronze skin, very tall with massive swimmer broad shoulders and pronounced inverted-triangle torso, defined abs, water droplets clinging to skin, navy national-team swim jacket open over chest, anime ikemen",
-        "style": "anime illustration, sports anime aesthetic, dramatic poolside lighting, cel shading, muscular character design",
-    },
-}
+# Import centralized NAI visual tags from seed_personas
+from scripts.seed_personas import PERSONA_VISUAL_TAGS
 
 
 async def ensure_columns(db):
@@ -154,7 +91,7 @@ async def generate_portraits(force: bool = False):
                 url = await generate_base_portrait(
                     visual_prompt_tags=visual_config["tags"],
                     gender=visual_config["gender"],
-                    style=visual_config["style"],
+                    style=visual_config.get("style", "anime illustration"),
                 )
 
                 if not url:
@@ -184,7 +121,28 @@ async def generate_portraits(force: bool = False):
 async def main():
     parser = argparse.ArgumentParser(description="Generate base portraits for AI personas")
     parser.add_argument("--force", action="store_true", help="Regenerate existing portraits")
+    parser.add_argument("--character", type=str, default=None,
+                        help="(NAI backend only) Generate for a single character name")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="(NAI backend only) Print what would be generated without calling the API")
     args = parser.parse_args()
+
+    backend = (settings.IMAGE_BACKEND or "").lower()
+    if backend == "nai":
+        # Delegate to the dedicated NAI script for consistency.
+        from scripts.generate_nai_portraits import run as run_nai
+        print(f"[base-portrait] IMAGE_BACKEND=nai -> delegating to generate_nai_portraits")
+        exit_code = await run_nai(
+            character=args.character,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+        if exit_code:
+            sys.exit(exit_code)
+        return
+
+    # Legacy DashScope path
+    print(f"[base-portrait] IMAGE_BACKEND={backend or 'dashscope'} -> using DashScope path")
     await generate_portraits(force=args.force)
 
 

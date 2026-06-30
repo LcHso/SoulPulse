@@ -42,6 +42,7 @@ from models.saved_post import SavedPost  # noqa: F401 — 收藏帖子模型
 from models.story_view import StoryView  # noqa: F401 — 故事浏览记录模型
 from models.follow import Follow  # noqa: F401 — 关注关系模型
 # 导入所有 API 路由
+from api.endpoints.health import router as health_router
 from api.endpoints.auth import router as auth_router
 from api.endpoints.feed import router as feed_router
 from api.endpoints.chat import router as chat_router
@@ -52,6 +53,7 @@ from api.endpoints.admin import router as admin_router
 from api.endpoints.interactions import router as interactions_router
 from api.endpoints.fcm import router as fcm_router
 from api.endpoints.subscription import router as subscription_router
+from api.endpoints.character_cards import router as character_cards_router
 from api.admin import admin_router as admin_v2_router
 
 # ── 结构化日志配置 ──────────────────────────────────────────
@@ -111,6 +113,7 @@ app.add_middleware(
 )
 
 # ── 注册 API 路由 ──────────────────────────────────────────
+app.include_router(health_router)          # 健康检查：数据库、向量库连通性
 app.include_router(auth_router)           # 认证相关：登录、注册、Token 刷新
 app.include_router(feed_router)           # 信息流：帖子列表、点赞、收藏
 app.include_router(chat_router)           # 聊天：与 AI 角色对话
@@ -120,6 +123,7 @@ app.include_router(notifications_router)  # 通知：系统通知、互动提醒
 app.include_router(interactions_router)   # 互动关系：亲密度、关系摘要
 app.include_router(fcm_router)             # FCM：设备推送 Token 管理
 app.include_router(subscription_router)   # 订阅与活动营销 (Plan Task 4)
+app.include_router(character_cards_router)  # SillyTavern V2 角色卡导入/导出
 app.include_router(admin_router)          # 管理后台：内容审核、数据分析（旧版兼容）
 app.include_router(admin_v2_router)       # SDC 管理后台 v2：完整 7 模块
 

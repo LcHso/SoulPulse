@@ -5,6 +5,7 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
 import '../../core/api/api_client.dart';
+import '../../core/theme/breakpoints.dart';
 import '../../core/theme/character_theme.dart';
 import '../../core/widgets/empty_state.dart';
 
@@ -54,6 +55,14 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
         title: Text('Discover',
             style:
                 GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 22)),
+        actions: [
+          IconButton(
+            tooltip: 'Import character card',
+            icon: const Icon(Icons.file_upload_outlined),
+            onPressed: () => context.push('/import-character'),
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: Column(
         children: [
@@ -133,18 +142,31 @@ class _DiscoverPageState extends ConsumerState<DiscoverPage> {
                     subtitle: 'Check back soon for new AI personalities',
                   );
                 }
-                return GridView.builder(
-                  padding: const EdgeInsets.all(12),
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: 2,
-                    childAspectRatio: 0.65,
-                    mainAxisSpacing: 12,
-                    crossAxisSpacing: 12,
-                  ),
-                  itemCount: personas.length,
-                  itemBuilder: (context, index) {
-                    final p = personas[index] as Map<String, dynamic>;
-                    return _PersonaCard(persona: p, isDark: isDark);
+                return LayoutBuilder(
+                  builder: (context, constraints) {
+                    final columns =
+                        Breakpoints.getGridColumns(constraints.maxWidth);
+                    return Center(
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                            maxWidth: Breakpoints.maxGridWidth),
+                        child: GridView.builder(
+                          padding: const EdgeInsets.all(12),
+                          gridDelegate:
+                              SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: columns,
+                            childAspectRatio: 0.65,
+                            mainAxisSpacing: 12,
+                            crossAxisSpacing: 12,
+                          ),
+                          itemCount: personas.length,
+                          itemBuilder: (context, index) {
+                            final p = personas[index] as Map<String, dynamic>;
+                            return _PersonaCard(persona: p, isDark: isDark);
+                          },
+                        ),
+                      ),
+                    );
                   },
                 );
               },

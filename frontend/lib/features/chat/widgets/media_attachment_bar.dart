@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../core/theme/character_theme.dart';
+import '../../../core/utils/image_compressor.dart';
 
 /// Called when a media file has been selected and is ready to send.
 /// [bytes]     — raw bytes of the file
@@ -55,13 +56,14 @@ class MediaAttachmentBar extends StatelessWidget {
     try {
       final file = await ImagePicker().pickImage(
         source: ImageSource.camera,
-        imageQuality: 80,
-        maxWidth: 1920,
-        maxHeight: 1920,
       );
       if (file == null) return;
-      final bytes = await file.readAsBytes();
-      onMediaSelected(bytes, file.name, 'image');
+      final rawBytes = await file.readAsBytes();
+      // Compress before upload: max 1920px, 80% JPEG quality
+      final compressed = await ImageCompressor.compress(rawBytes);
+      final bytes = compressed ?? rawBytes;
+      final fileName = _jpegFileName(file.name);
+      onMediaSelected(bytes, fileName, 'image');
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -75,13 +77,14 @@ class MediaAttachmentBar extends StatelessWidget {
     try {
       final file = await ImagePicker().pickImage(
         source: ImageSource.gallery,
-        imageQuality: 80,
-        maxWidth: 1920,
-        maxHeight: 1920,
       );
       if (file == null) return;
-      final bytes = await file.readAsBytes();
-      onMediaSelected(bytes, file.name, 'image');
+      final rawBytes = await file.readAsBytes();
+      // Compress before upload: max 1920px, 80% JPEG quality
+      final compressed = await ImageCompressor.compress(rawBytes);
+      final bytes = compressed ?? rawBytes;
+      final fileName = _jpegFileName(file.name);
+      onMediaSelected(bytes, fileName, 'image');
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -107,6 +110,15 @@ class MediaAttachmentBar extends StatelessWidget {
         );
       }
     }
+  }
+
+  /// Replace file extension with .jpg since we always re-encode as JPEG.
+  static String _jpegFileName(String original) {
+    final dotIdx = original.lastIndexOf('.');
+    if (dotIdx > 0) {
+      return '${original.substring(0, dotIdx)}.jpg';
+    }
+    return '$original.jpg';
   }
 
   // ─── build ────────────────────────────────────────────────────────────────

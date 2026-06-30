@@ -8,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shimmer/shimmer.dart';
 import '../../core/providers/feed_provider.dart';
 import '../../core/providers/notification_provider.dart';
+import '../../core/theme/breakpoints.dart';
 import '../../core/widgets/empty_state.dart';
 import 'widgets/story_bar.dart';
 import 'widgets/post_card_factory.dart';
@@ -136,7 +137,13 @@ class _FeedPageState extends ConsumerState<FeedPage>
                         itemCount: feedState.posts.length + 2,
                         itemBuilder: (context, index) {
                           if (index == 0) {
-                            return StoryBar(onStoryTap: _openStoryPlayer);
+                            return Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                    maxWidth: Breakpoints.maxContentWidthWide),
+                                child: StoryBar(onStoryTap: _openStoryPlayer),
+                              ),
+                            );
                           }
 
                           if (index == feedState.posts.length + 1) {
@@ -171,21 +178,27 @@ class _FeedPageState extends ConsumerState<FeedPage>
                             return const SizedBox.shrink();
                           }
 
-                          // Post card with 12dp spacing
+                          // Post card with 12dp spacing, constrained on desktop
                           final post = feedState.posts[index - 1];
-                          return Padding(
-                            padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
-                            child: PostCardFactory.build(
-                              post: post,
-                              onLike: () => ref
-                                  .read(feedProvider.notifier)
-                                  .toggleLike(post['id']),
-                              onSave: () => ref
-                                  .read(feedProvider.notifier)
-                                  .toggleSave(post['id']),
-                              onDM: () => _openChat(post),
-                              onProfileTap: () => _openProfile(post),
-                              onComment: () => _openPostDetail(post),
+                          return Center(
+                            child: ConstrainedBox(
+                              constraints: const BoxConstraints(
+                                  maxWidth: Breakpoints.maxContentWidth),
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(8, 0, 8, 12),
+                                child: PostCardFactory.build(
+                                  post: post,
+                                  onLike: () => ref
+                                      .read(feedProvider.notifier)
+                                      .toggleLike(post['id']),
+                                  onSave: () => ref
+                                      .read(feedProvider.notifier)
+                                      .toggleSave(post['id']),
+                                  onDM: () => _openChat(post),
+                                  onProfileTap: () => _openProfile(post),
+                                  onComment: () => _openPostDetail(post),
+                                ),
+                              ),
                             ),
                           );
                         },
