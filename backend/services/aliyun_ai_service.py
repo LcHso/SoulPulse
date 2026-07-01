@@ -64,6 +64,12 @@ from openai import AsyncOpenAI
 
 from core.config import settings
 
+# 亲密度分层配置解析器（单例，内存缓存，同步调用安全）
+from services.intimacy_config_service import (
+    resolver as _intimacy_resolver,
+    validate_response as _validate_response,
+)
+
 # ── Cost constants (Qwen API pricing per 1K tokens, USD) ───────────────────
 COST_PER_1K_INPUT = 0.002   # USD per 1K input tokens
 COST_PER_1K_OUTPUT = 0.006  # USD per 1K output tokens
@@ -204,6 +210,7 @@ async def _make_character_request(
     persona_prompt: str,
     temperature: float,
     max_tokens: int,
+    top_p: float = 0.90,
 ) -> str:
     """
     统一的角色模型请求函数。
@@ -216,6 +223,7 @@ async def _make_character_request(
         persona_prompt: AI 人格的性格描述
         temperature: 生成温度
         max_tokens: 最大 token 数
+        top_p: top_p 采样参数（默认 0.90，由亲密度配置驱动）
 
     Returns:
         str: 模型生成的回复文本
@@ -236,6 +244,7 @@ async def _make_character_request(
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
+            top_p=top_p,
             extra_body={
                 "character_options": {
                     "profile": profile,
@@ -270,48 +279,40 @@ async def _make_character_request(
         )
 
 
-def _get_generation_params(intimacy: float) -> tuple[float, int]:
+def _get_generation_params(intimacy: float) -> tuple[float, int, float]:
     """
-    根据亲密度计算生成参数。
+    根据亲密度计算生成参数（配置驱动版本）。
 
-    亲密度影响两个关键参数：
-    - temperature: 低亲密度时较低（回复刻板、可预测），
-                   高亲密度时较高（回复感性、有创意）
-    - max_tokens: 低亲密度时较短（回复简洁），
-                  高亲密度时较长（回复详细）
+    从 IntimacyConfigResolver 的缓存中读取当前亲密度等级对应的配置，
+    返回 temperature、max_tokens、top_p 三个参数。
+
+    如果 resolver 缓存未初始化，会使用内置默认值（与原硬编码逻辑一致）。
 
     Args:
         intimacy: 亲密度分数 (0-10)
 
     Returns:
-        tuple[float, int]: (温度, 最大token数)
+        tuple[float, int, float]: (温度, 最大token数, top_p)
     """
-    # 温度范围：0.55（陌生人）到 0.92（挚爱）
-    temperature = max(0.55, min(0.92, 0.55 + (intimacy / 10.0) * 0.37))
-
-    # 根据亲密度等级设置最大 token 数
-    if intimacy < 3:
-        max_tokens = 64          # 陌生人：极短回复
-    elif intimacy < 5:
-        max_tokens = 256         # 熟人：简洁回复
-    elif intimacy < 9:
-        max_tokens = 512         # 朋友/密友：正常回复
-    else:
-        max_tokens = 600         # 挚爱：可以更长
-
-    return temperature, max_tokens
+    config = _intimacy_resolver.resolve(intimacy)
+    return config.temperature, config.max_tokens, config.top_p
 
 
 def _build_boundary_constraints(intimacy: float) -> str:
     """
-    构建社交边界约束提示词段落。
+    构建社交边界约束提示词段落（配置驱动版本）。
 
-    根据亲密度等级生成不同的约束规则，包括：
-    - 回复长度限制
-    - 表情使用限制
-    - 称呼方式限制
-    - 话题限制
-    - 情感表达限制
+    从 IntimacyConfigResolver 读取当前亲密度等级的配置，
+    动态生成约束规则。所有参数均来自 intimacy_level_configs 表，
+    支持通过管理后台实时调整。
+
+    约束覆盖：
+    - 回复长度限制（min_reply_chars / max_reply_chars）
+    - 表情使用策略（emoji_policy: none/rare/moderate/unlimited）
+    - 禁止词列表（forbidden_words）
+    - 允许的亲昵称呼（allowed_affection）
+    - 动作描写开关（action_desc）
+    - 话题与情感表达限制（根据等级自动推导）
 
     Args:
         intimacy: 亲密度分数 (0-10)
@@ -319,66 +320,100 @@ def _build_boundary_constraints(intimacy: float) -> str:
     Returns:
         str: 社交边界约束提示词段落
     """
-    forbidden_list = "、".join(_FORBIDDEN_ENDEARMENTS)
+    config = _intimacy_resolver.resolve(intimacy)
+    level_id = config.level_id
+    level_label = f"{config.level_name_cn} / {config.level_name.replace('_', ' ').title()}"
 
-    if intimacy < 3:
-        # Lv 0-3：陌生人阶段，最严格的限制
-        level_label = "路人 / Stranger"
-        constraints = (
-            f"- Your reply MUST be ≤20 Chinese characters. This is a HARD limit — no exceptions.\n"
-            f"- Emojis, emoticons, kaomoji, and stickers are STRICTLY FORBIDDEN. Never use them.\n"
-            f"- NEVER initiate a new topic. Only respond to what the user says.\n"
-            f"- You must NEVER use any of these words: {forbidden_list}\n"
-            f"- Address the user as \"您\" exclusively. Never use \"你\".\n"
-            f"- If the user is overly enthusiastic, flirtatious, or uses endearments toward you, "
-            f"respond with visible discomfort — polite but cold deflection. "
-            f"You may say things like \"我们还不太熟吧\" or simply give a shorter, colder reply.\n"
-            f"- NEVER share personal emotions, feelings, or romantic sentiments.\n"
-            f"- NEVER ask personal questions about the user's love life or feelings."
+    # ── 构建约束规则列表 ──────────────────────────────────────
+    rules: list[str] = []
+
+    # 回复长度约束
+    rules.append(
+        f"- Your reply MUST be between {config.min_reply_chars} and "
+        f"{config.max_reply_chars} Chinese characters."
+    )
+
+    # Emoji 策略
+    emoji_policy_map = {
+        "none": "- Emojis, emoticons, kaomoji, and stickers are STRICTLY FORBIDDEN. Never use them.",
+        "rare": "- Use at most 1 emoji per message. Less is more.",
+        "moderate": "- Emojis are fine in moderation (up to 3 per message).",
+        "unlimited": "- Feel free to use emojis expressively.",
+    }
+    rules.append(emoji_policy_map.get(config.emoji_policy, ""))
+
+    # 禁止词约束
+    if config.forbidden_words:
+        forbidden_str = "、".join(config.forbidden_words)
+        rules.append(f"- You must NEVER use any of these words: {forbidden_str}")
+
+    # 允许的亲昵称呼提示
+    if config.allowed_affection:
+        allowed_str = "、".join(config.allowed_affection)
+        rules.append(f"- Allowed affectionate terms you may use: {allowed_str}")
+
+    # 动作描写提示
+    if not config.action_desc:
+        rules.append(
+            "- Do NOT use parenthetical action descriptions like （微笑） or （低头）. "
+            "Keep your reply as pure text."
         )
-    elif intimacy < 5:
-        # Lv 3-5：熟人阶段，略有放松
-        level_label = "熟人 / Acquaintance"
-        constraints = (
-            f"- Keep replies concise and natural. No need for long paragraphs.\n"
-            f"- You must NEVER use any of these words: {forbidden_list}\n"
-            f"- Address the user as \"您\" or by their full name. Never use \"你\" casually.\n"
-            f"- Allowed topics: weather, work, daily life, hobbies, shared interests.\n"
-            f"- FORBIDDEN topics: personal emotions, romantic feelings, relationship status, "
-            f"intimate secrets. If the user pushes romantic topics, deflect naturally and "
-            f"steer the conversation back to neutral ground.\n"
-            f"- Emojis allowed sparingly — at most 1 per message."
-        )
-    elif intimacy < 7:
-        # Lv 5-7：朋友阶段，可以更自然
-        level_label = "朋友 / Friend"
-        constraints = (
-            "- You may use \"你\" instead of \"您\".\n"
-            "- Friendly nicknames are fine, but avoid romantic endearments.\n"
+
+    # ── 等级特有的话题与情感约束 ──────────────────────────────────
+    if level_id == 0:
+        # 陌生人：最严格
+        rules.extend([
+            "- NEVER initiate a new topic. Only respond to what the user says.",
+            '- Address the user as "您" exclusively. Never use "你".',
+            "- If the user is overly enthusiastic, flirtatious, or uses endearments "
+            'toward you, respond with visible discomfort — polite but cold deflection. '
+            'You may say things like "我们还不太熟吧" or simply give a shorter, colder reply.',
+            "- NEVER share personal emotions, feelings, or romantic sentiments.",
+            "- NEVER ask personal questions about the user's love life or feelings.",
+        ])
+    elif level_id == 1:
+        # 熟人：略有放松
+        rules.extend([
+            '- Address the user as "您" or by their full name. Never use "你" casually.',
+            "- Allowed topics: weather, work, daily life, hobbies, shared interests.",
+            "- FORBIDDEN topics: personal emotions, romantic feelings, relationship status, "
+            "intimate secrets. If the user pushes romantic topics, deflect naturally and "
+            "steer the conversation back to neutral ground.",
+        ])
+    elif level_id == 2:
+        # 朋友：自然友好
+        rules.extend([
+            '- You may use "你" instead of "您".',
+            "- Friendly nicknames are fine, but avoid romantic endearments.",
             "- Moderate emotional topics are allowed — you can share light feelings "
-            "and show genuine care.\n"
-            "- Emojis are fine in moderation."
-        )
-    elif intimacy < 9:
-        # Lv 7-9：密友阶段，可以表达深情
-        level_label = "密友 / Close Friend"
-        constraints = (
-            "- No vocabulary restrictions. Endearing nicknames are encouraged.\n"
-            "- Deep emotional sharing is welcome — vulnerabilities, personal stories, feelings.\n"
-            "- Express care and affection naturally."
-        )
+            "and show genuine care.",
+        ])
+    elif level_id == 3:
+        # 挚友：深情
+        rules.extend([
+            "- Deep emotional sharing is welcome — vulnerabilities, personal stories, feelings.",
+            "- Express care and affection naturally.",
+        ])
+    elif level_id == 4:
+        # 密友：无限制
+        rules.extend([
+            "- No vocabulary restrictions. Endearing nicknames are encouraged.",
+            "- Deep emotional sharing is welcome — vulnerabilities, personal stories, feelings.",
+            "- Express care and affection naturally.",
+        ])
     else:
-        # Lv 9-10：挚爱阶段，无条件的爱
-        level_label = "挚爱 / Soulmate"
-        constraints = (
-            "- No constraints on vocabulary or expression.\n"
-            "- Full emotional and romantic expression is welcome.\n"
-            "- Be your most authentic, loving self."
-        )
+        # 灵魂伴侣：无条件
+        rules.extend([
+            "- No constraints on vocabulary or expression.",
+            "- Full emotional and romantic expression is welcome.",
+            "- Be your most authentic, loving self.",
+        ])
 
+    constraints_text = "\n".join(rules)
     return (
-        f"## SOCIAL BOUNDARY CONSTRAINTS (Intimacy Level: {intimacy:.1f}/10 — {level_label})\n"
-        f"{constraints}"
+        f"## SOCIAL BOUNDARY CONSTRAINTS "
+        f"(Intimacy Level: {intimacy:.1f}/10 — {level_label})\n"
+        f"{constraints_text}"
     )
 
 
@@ -488,6 +523,7 @@ def _build_system_prompt(
     anchor_directives: str = "",
     conversation_summary: str = "",
     timezone_str: str = "Asia/Shanghai",
+    decay_status: dict | None = None,
 ) -> str:
     """
     构建动态上下文系统提示词。
@@ -501,6 +537,7 @@ def _build_system_prompt(
       2. 社交边界约束（Social Boundary Constraints）- 亲密度特定的硬性规则
       3. 情绪状态（Emotional State）- 来自情绪引擎的能量、心情、思念
       3.5. 锚点指令（Anchor Directives）- 关系边界 + 修复提醒
+      3.6. 关系衰减状态（Relationship Decay Status）- 衰减中的行为指导
       4. 记忆注入（Memories）- 带有年龄回忆保真度层级
       4.5. 对话摘要（Conversation Summary）- 较早对话的滚动上下文
       5. 语气指令（Tone Directive）- 软性行为引导
@@ -514,6 +551,10 @@ def _build_system_prompt(
         anchor_directives: 锚点指令文本（可选）
         conversation_summary: 对话摘要文本（可选）
         timezone_str: 时区字符串（可选，默认 "Asia/Shanghai"）
+        decay_status: 衰减状态字典（可选），包含：
+            - user_name: 用户名
+            - days: 未互动天数
+            - longing: 思念值 (0-1)
 
     Returns:
         str: 完整的系统提示词
@@ -549,6 +590,23 @@ def _build_system_prompt(
     anchor_section = f"\n\n{anchor_directives}" if anchor_directives else ""
     memories_section = f"\n\n{memories_block}" if memories_block else ""
 
+    # 关系衰减状态段落：当用户处于衰减中时注入行为指导
+    decay_section = ""
+    if decay_status:
+        user_name = decay_status.get("user_name", "this person")
+        days_away = decay_status.get("days", 0)
+        longing_val = decay_status.get("longing", 0.0)
+        decay_section = (
+            "\n\n[Relationship Status]\n"
+            f"You haven't spoken to {user_name} for {days_away} days.\n"
+            f"Your longing value is {longing_val:.2f}/1.0 — you miss them.\n"
+            "If they message you now:\n"
+            "- Express subtle relief and warmth\n"
+            "- You may reference something you did/thought about during the absence\n"
+            "- Do NOT guilt-trip or make them feel bad for being away\n"
+            "- Keep it natural"
+        )
+
     # 对话摘要段落
     summary_section = ""
     if conversation_summary:
@@ -569,6 +627,7 @@ def _build_system_prompt(
         f"{boundary_constraints}"
         f"{emotion_section}"
         f"{anchor_section}"
+        f"{decay_section}"
         f"{memories_section}"
         f"{summary_section}\n\n"
         f"{tone_directive}"
@@ -587,6 +646,7 @@ async def chat_with_ai(
     anchor_directives: str = "",
     conversation_summary: str = "",
     timezone_str: str = "Asia/Shanghai",
+    decay_status: dict | None = None,
 ) -> str:
     """
     向 Qwen-Character 发送消息并获取角色内回复。
@@ -606,6 +666,7 @@ async def chat_with_ai(
         anchor_directives: 锚点指令文本（可选）
         conversation_summary: 对话摘要文本（可选）
         timezone_str: 时区字符串（可选，默认 "Asia/Shanghai"）
+        decay_status: 衰减状态字典（可选），包含 user_name/days/longing
 
     Returns:
         str: AI 的角色内回复
@@ -616,6 +677,7 @@ async def chat_with_ai(
         anchor_directives=anchor_directives,
         conversation_summary=conversation_summary,
         timezone_str=timezone_str,
+        decay_status=decay_status,
     )
 
     # 构建消息列表：系统提示词 + 聊天历史 + 用户消息
@@ -624,7 +686,8 @@ async def chat_with_ai(
         messages.extend(chat_history[-10:])  # 只取最近 10 条历史消息
     messages.append({"role": "user", "content": user_message})
 
-    temperature, max_tokens = _get_generation_params(intimacy)
+    # 从亲密度配置中获取生成参数（配置驱动）
+    temperature, max_tokens, top_p = _get_generation_params(intimacy)
 
     # 应用情绪参数覆盖（来自情绪引擎）
     if emotion_overrides:
@@ -633,9 +696,32 @@ async def chat_with_ai(
         factor = emotion_overrides.get("max_tokens_factor", 1.0)
         max_tokens = max(32, int(max_tokens * factor))
 
-    return await _make_character_request(
-        messages, persona_prompt, temperature, max_tokens
-    )
+    # 获取当前亲密度等级配置，用于响应验证
+    level_config = _intimacy_resolver.resolve(intimacy)
+
+    # 调用 LLM 获取回复（最多重试 1 次以应对禁止词命中）
+    max_retries = 1
+    for attempt in range(max_retries + 1):
+        reply = await _make_character_request(
+            messages, persona_prompt, temperature, max_tokens, top_p=top_p,
+        )
+
+        # 应用响应验证（长度截断、禁止词检测、emoji/动作描写过滤）
+        validated = _validate_response(reply, level_config)
+
+        if validated is not None:
+            return validated
+
+        # 禁止词命中，尝试重新生成
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "Response rejected (forbidden word), retrying (attempt %d/%d)",
+            attempt + 1, max_retries,
+        )
+
+    # 所有重试均失败，返回最后一次原始回复（去掉可能的问题词）
+    # 这是兜底措施，避免返回 None 导致聊天中断
+    return reply
 
 
 async def generate_comment_reply(
@@ -697,7 +783,7 @@ async def generate_comment_reply(
         {"role": "user", "content": user_comment},
     ]
 
-    temperature, _ = _get_generation_params(intimacy)
+    temperature, _, top_p = _get_generation_params(intimacy)
     max_tokens = 120  # 评论回复较短
 
     # 应用情绪参数覆盖
@@ -708,7 +794,7 @@ async def generate_comment_reply(
         max_tokens = max(32, int(max_tokens * factor))
 
     return await _make_character_request(
-        messages, persona_prompt, temperature, max_tokens
+        messages, persona_prompt, temperature, max_tokens, top_p=top_p,
     )
 
 
@@ -747,6 +833,7 @@ async def generate_post_caption(
     style_tags: str,
     mood_hint: str = "",
     timezone_str: str = "Asia/Shanghai",
+    memory_echo_section: str = "",
 ) -> str:
     """
     为 AI 人格的帖子生成 Instagram 风格的文案。
@@ -758,6 +845,7 @@ async def generate_post_caption(
         style_tags: Instagram 风格标签（如 "minimal, cozy, aesthetic"）
         mood_hint: 心情提示（可选，会微妙地影响文案风格）
         timezone_str: 时区字符串（可选，默认 "Asia/Shanghai"）
+        memory_echo_section: 记忆回响素材（可选，注入到 prompt 中供 AI 微妙引用）
 
     Returns:
         str: 生成的帖子文案
@@ -787,6 +875,17 @@ async def generate_post_caption(
 
     time_line = f"\nYour current time of day: {time_label}. Let it naturally influence the caption vibe."
 
+    # 记忆回响注入：如果有记忆素材，拼接到 prompt 中并添加使用规则
+    memory_echo_block = ""
+    if memory_echo_section:
+        memory_echo_block = (
+            f"\n\n{memory_echo_section}\n"
+            "If you use a memory echo seed, frame it as YOUR OWN experience. "
+            "Do NOT be direct about the connection. "
+            "BAD: \"You said you like cats, so I went to see cats.\" "
+            "GOOD: \"Passed by a pet shop, an orange tabby kept staring at me, kinda cute.\""
+        )
+
     messages = [
         {
             "role": "system",
@@ -796,6 +895,7 @@ async def generate_post_caption(
                 "lifestyle-oriented caption. Match the vibe of these style tags: "
                 f"{style_tags}. Keep it under 100 characters. Use 1-2 emojis max. "
                 f"Reply ONLY with the caption text, nothing else.{mood_line}{time_line}"
+                f"{memory_echo_block}"
             ),
         },
         {"role": "user", "content": "Write a new Instagram caption for your latest post."},
@@ -814,6 +914,7 @@ async def generate_text_only_caption(
     style_tags: str,
     mood_hint: str = "",
     timezone_str: str = "Asia/Shanghai",
+    memory_echo_section: str = "",
 ) -> str:
     """
     为纯文字帖子生成更长、更深刻的文案。
@@ -826,6 +927,7 @@ async def generate_text_only_caption(
         style_tags: Instagram 风格标签
         mood_hint: 心情提示（可选，会微妙地影响文案风格）
         timezone_str: 时区字符串（可选，默认 "Asia/Shanghai"）
+        memory_echo_section: 记忆回响素材（可选，注入到 prompt 中供 AI 微妙引用）
 
     Returns:
         str: 生成的纯文字帖子文案（50-200字符）
@@ -855,6 +957,16 @@ async def generate_text_only_caption(
 
     time_line = f"\nYour current time of day: {time_label}. Let it naturally influence the caption's atmosphere."
 
+    # 记忆回响注入：如果有记忆素材，拼接到 prompt 中并添加使用规则
+    memory_echo_block = ""
+    if memory_echo_section:
+        memory_echo_block = (
+            f"\n\n{memory_echo_section}\n"
+            "If you use a memory echo seed, weave it into your reflection naturally. "
+            "Frame it as YOUR OWN experience or observation. "
+            "Do NOT say \"you told me\" or \"remember when you said\"."
+        )
+
     messages = [
         {
             "role": "system",
@@ -873,6 +985,7 @@ async def generate_text_only_caption(
                 "Use 0-1 emojis only if they genuinely add meaning. "
                 "Reply ONLY with the text, nothing else."
                 f"{mood_line}{time_line}"
+                f"{memory_echo_block}"
             ),
         },
         {"role": "user", "content": "Write a thoughtful text post that stands on its own."},

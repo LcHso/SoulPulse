@@ -55,6 +55,7 @@ from services import (
     anchor_service,
     embedding_service,
     emotion_engine,
+    intimacy_service,
     memory_service,
     milestone_service,
 )
@@ -852,7 +853,22 @@ async def handle_user_message(
             "表达额外亲近、心领神会。"
         )
 
-    # ── 步骤 11: 调用 AI 生成回复
+    # ── 步骤 11: 构建衰减状态并调用 AI 生成回复 ─────────────────────────
+    decay_status = None
+    if interaction.is_decaying and interaction.last_interaction_at:
+        from datetime import timezone as _dt_tz
+        now_utc = datetime.now(_dt_tz.utc)
+        last_at = interaction.last_interaction_at
+        if last_at.tzinfo is None:
+            last_at = last_at.replace(tzinfo=_dt_tz.utc)
+        days_away = max(1, int((now_utc - last_at).total_seconds() / 86400))
+        longing_val = float(emotion_state.longing or 0.0)
+        decay_status = {
+            "user_name": user.nickname or "you",
+            "days": days_away,
+            "longing": longing_val,
+        }
+
     try:
         reply = await chat_with_ai(
             persona_prompt=persona_prompt_with_world,
@@ -866,6 +882,7 @@ async def handle_user_message(
             anchor_directives=anchor_directives,
             conversation_summary=conversation_summary,
             timezone_str=persona.timezone,
+            decay_status=decay_status,
         )
     except Exception:
         # AI 服务不可用时的备用回复
@@ -892,9 +909,14 @@ async def handle_user_message(
         voice_url=ai_voice_url,
     )
 
-    # ── 步骤 13: 更新亲密度分数 ─────────────────────────────────────
+    # ── 步骤 13: 更新亲密度分数（含回温加成）───────────────────────────────
     old_intimacy = interaction.intimacy_score
-    interaction.intimacy_score = min(interaction.intimacy_score + 0.2, 10.0)
+    # 如果用户从衰减中回归，初始化回温加成次数
+    await intimacy_service.on_user_return(db, interaction)
+    # 使用统一的亲密度加分函数（自动处理回温加成 1.5x 与衰减状态清除）
+    actual_gain = await intimacy_service.apply_intimacy_gain(
+        db, interaction, base_gain=0.2,
+    )
     interaction.last_chat_summary = f"User: {message[:100]} | AI: {reply[:100]}"
 
     # ── 步骤 14: 应用情绪交互效果 ───────────────────────────

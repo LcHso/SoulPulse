@@ -1,7 +1,8 @@
 """Unified scheduler runner.
 
-Runs both emotion_scheduler and post_scheduler concurrently
-in a single async event loop to reduce SQLite write contention.
+Runs emotion_scheduler, post_scheduler, proactive_dm_evaluator,
+and intimacy_decay_job concurrently in a single async event loop
+to reduce SQLite write contention.
 
 Usage (from backend directory):
     python3 scripts/run_all_schedulers.py
@@ -17,6 +18,8 @@ from core.database import init_db
 from scripts.emotion_scheduler import run_scheduler as run_emotion_scheduler
 from scripts.post_scheduler import run_scheduler as run_post_scheduler
 from scripts.post_scheduler import _run_auto_approve_loop
+from scripts.intimacy_decay_job import run_scheduler as run_intimacy_decay
+from scripts.proactive_dm_evaluator import run_scheduler as run_proactive_dm_evaluator
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,6 +37,8 @@ async def main():
         run_emotion_scheduler(),
         run_post_scheduler(),
         _run_auto_approve_loop(),
+        run_intimacy_decay(),
+        run_proactive_dm_evaluator(),
     )
 
 

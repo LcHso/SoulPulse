@@ -24,7 +24,7 @@ SoulPulse 用户-角色互动关系模型
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import String, Integer, Float, Text, DateTime, ForeignKey, JSON, func
+from sqlalchemy import String, Integer, Float, Text, DateTime, Boolean, ForeignKey, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -97,6 +97,29 @@ class Interaction(Base):
     )
     # 用户与该角色累计互动天数（不要求连续）
     total_interaction_days: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # ── 亲密度衰减机制字段 (Intimacy Decay) ──────────────────────────────────────
+    # 最后互动时间：用于判断是否触发衰减（与 emotion_states.last_interaction_at 含义类似，
+    # 但此字段在 interactions 表上，便于衰减 job 直接查询）
+    last_interaction_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(),
+    )
+    # 衰减开始时间：首次进入衰减状态时记录，用于追踪衰减持续时长
+    decay_started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None,
+    )
+    # 回温加成剩余次数：用户回归后，前 N 次互动享受 1.5x 亲密度加成（最多 3 次）
+    return_bonus_remaining: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 是否在衰减中：标记当前 user-AI pair 是否处于亲密度衰减状态
+    is_decaying: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # ── 主动 DM 系统字段 (Proactive DM / 思念触发) ──────────────────────────────
+    # 上次发送主动 DM 的时间，用于冷却判断（NULL 表示从未发送过）
+    last_proactive_dm_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None,
+    )
+    # 累计发送主动 DM 的次数（用于统计和策略调整）
+    proactive_dm_count: Mapped[int] = mapped_column(Integer, default=0)
 
     # ── 时间戳字段 ──────────────────────────────────────────
     # 更新时间：记录互动状态的最后修改时间
