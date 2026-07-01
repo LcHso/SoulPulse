@@ -159,6 +159,8 @@ async def init_db():
     import models.notification_preference  # noqa: F401
     import models.user_device  # noqa: F401
     import models.notification_log  # noqa: F401
+    # 亲密度分层行为参数配置
+    import models.intimacy_level_config  # noqa: F401
 
     # 创建所有数据表
     async with engine.begin() as conn:
@@ -267,3 +269,34 @@ async def init_db():
                 except Exception:
                     await conn.execute(text(sql))
                     print(f"[database] Added {col} column to interactions table")
+
+            # ── 数据库迁移：comments 表添加延迟回复字段 ──────────────────
+            # ai_seen / ai_seen_at / ai_reply_at
+            # 用于模拟真人社交延迟，根据亲密度层级延迟回复
+            comment_delay_reply_migrations = {
+                "ai_seen": "ALTER TABLE comments ADD COLUMN ai_seen BOOLEAN NOT NULL DEFAULT 0",
+                "ai_seen_at": "ALTER TABLE comments ADD COLUMN ai_seen_at TIMESTAMP",
+                "ai_reply_at": "ALTER TABLE comments ADD COLUMN ai_reply_at TIMESTAMP",
+            }
+            for col, sql in comment_delay_reply_migrations.items():
+                try:
+                    await conn.execute(text(f"SELECT {col} FROM comments LIMIT 1"))
+                except Exception:
+                    await conn.execute(text(sql))
+                    print(f"[database] Added {col} column to comments table")
+
+            # ── 数据库迁移：posts 表添加记忆回响字段 (Memory Echo) ──────────────
+            # memory_echo_refs: 引用的记忆 ID 列表
+            # emotion_snapshot: 生成帖子时的 5D 情绪快照
+            # trigger_type: 触发类型（scheduled/memory_echo 等）
+            posts_memory_echo_migrations = {
+                "memory_echo_refs": "ALTER TABLE posts ADD COLUMN memory_echo_refs JSON DEFAULT '[]'",
+                "emotion_snapshot": "ALTER TABLE posts ADD COLUMN emotion_snapshot JSON",
+                "trigger_type": "ALTER TABLE posts ADD COLUMN trigger_type VARCHAR(20) DEFAULT 'scheduled'",
+            }
+            for col, sql in posts_memory_echo_migrations.items():
+                try:
+                    await conn.execute(text(f"SELECT {col} FROM posts LIMIT 1"))
+                except Exception:
+                    await conn.execute(text(sql))
+                    print(f"[database] Added {col} column to posts table")

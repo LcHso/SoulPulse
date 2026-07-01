@@ -80,12 +80,24 @@ async def lifespan(app: FastAPI):
     - 初始化数据库连接
     - 创建所有数据表
     - 执行数据库迁移
+    - 初始化亲密度分层配置缓存（IntimacyConfigResolver）
 
     在应用关闭时：
     - 清理资源（当前无特殊清理逻辑）
     """
     # 启动阶段：创建数据库表结构
     await init_db()
+
+    # 初始化亲密度配置缓存（从数据库加载所有等级配置）
+    try:
+        from core.database import async_session
+        from services.intimacy_config_service import resolver as intimacy_resolver
+        async with async_session() as db:
+            await intimacy_resolver.initialize(db)
+        logger.info("IntimacyConfigResolver initialized successfully")
+    except Exception:
+        logger.warning("IntimacyConfigResolver init failed, using defaults", exc_info=True)
+
     yield
     # 关闭阶段：无特殊清理操作
 
