@@ -5,6 +5,7 @@ SoulPulse 评论模型
 - 基本信息：评论内容、创建时间
 - 发送者信息：用户或 AI 角色
 - 关联关系：所属帖子、回复目标
+- AI 感知与延迟回复：ai_seen / ai_seen_at / ai_reply_at
 
 评论来源说明：
 - user_id 有值：用户发表的评论
@@ -13,10 +14,14 @@ SoulPulse 评论模型
 回复机制：
 - is_ai_reply=True：AI 自动回复用户评论
 - reply_to：指向被回复的评论 ID，形成回复链
+- ai_seen：AI 是否已看到该评论（用户评论被接收后立即标记）
+- ai_seen_at：AI 看到评论的时间
+- ai_reply_at：AI 计划回复的展示时间（用于前端轮询判断）
 
 设计用途：
 - 增强社交互动体验
 - AI 角色可以自动回复用户评论
+- 模拟真人社交延迟，根据亲密度层级延迟 5 秒到 5 分钟
 - 支持评论嵌套和回复追踪
 """
 
@@ -25,7 +30,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Integer, String, Text, DateTime, ForeignKey, func
+from sqlalchemy import Integer, String, Text, DateTime, Boolean, ForeignKey, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -47,6 +52,9 @@ class Comment(Base):
         is_ai_reply: 是否 AI 自动回复
         reply_to: 回复目标评论 ID
         content: 评论内容
+        ai_seen: AI 是否已看到该评论
+        ai_seen_at: AI 看到评论的时间
+        ai_reply_at: AI 计划回复的展示时间
         created_at: 创建时间
     """
     __tablename__ = "comments"
@@ -71,6 +79,14 @@ class Comment(Base):
     # ── 内容字段 ──────────────────────────────────────────
     # 评论文本内容
     content: Mapped[str] = mapped_column(Text, default="")
+
+    # ── AI 感知与延迟回复字段 ──────────────────────────────────────────
+    # AI 是否已看到该评论：用户评论被接收后立即标记为 True
+    ai_seen: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # AI 看到评论的时间：与 ai_seen 配合，记录精确时间戳
+    ai_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+    # AI 计划回复的展示时间：前端据此判断何时显示回复，持久化以防服务重启丢失
+    ai_reply_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
 
     # ── 时间戳字段 ──────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

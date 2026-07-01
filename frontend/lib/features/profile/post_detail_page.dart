@@ -398,57 +398,99 @@ class _PostDetailPageState extends State<PostDetailPage> {
                         comment['created_at'] as String? ?? '';
                     final replyTo = comment['reply_to'];
 
-                    return Padding(
-                      padding: EdgeInsets.fromLTRB(
-                          replyTo != null ? 40 : 14, 6, 14, 6),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _buildAvatar(
-                            authorAvatar,
-                            authorName,
-                            14,
-                            fallbackColor: isAi
-                                ? const Color(0xFFDD2A7B)
-                                : Colors.grey[400]!,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                RichText(
-                                  text: TextSpan(
-                                    style: GoogleFonts.inter(
-                                      fontSize: 13,
-                                      color:
-                                          isDark ? Colors.white : Colors.black,
-                                    ),
-                                    children: [
-                                      TextSpan(
-                                        text: '$authorName ',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w600,
-                                          color: isAi
-                                              ? const Color(0xFFDD2A7B)
-                                              : null,
+                    // Parse ai_reply status for pending indicator
+                    final aiReply = comment['ai_reply'] as Map<String, dynamic>?;
+                    final aiReplyPending = aiReply != null &&
+                        aiReply['status'] == 'pending';
+
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: EdgeInsets.fromLTRB(
+                              replyTo != null ? 40 : 14, 6, 14, 6),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              _buildAvatar(
+                                authorAvatar,
+                                authorName,
+                                14,
+                                fallbackColor: isAi
+                                    ? const Color(0xFFDD2A7B)
+                                    : Colors.grey[400]!,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                  children: [
+                                    RichText(
+                                      text: TextSpan(
+                                        style: GoogleFonts.inter(
+                                          fontSize: 13,
+                                          color: isDark
+                                              ? Colors.white
+                                              : Colors.black,
                                         ),
+                                        children: [
+                                          TextSpan(
+                                            text: '$authorName ',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.w600,
+                                              color: isAi
+                                                  ? const Color(0xFFDD2A7B)
+                                                  : null,
+                                            ),
+                                          ),
+                                          TextSpan(text: content),
+                                        ],
                                       ),
-                                      TextSpan(text: content),
-                                    ],
+                                    ),
+                                    const SizedBox(height: 2),
+                                    Text(
+                                      _formatTime(commentCreatedAt),
+                                      style: GoogleFonts.inter(
+                                          fontSize: 11,
+                                          color: Colors.grey[500]),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        // Show typing indicator when AI reply is pending
+                        if (aiReplyPending)
+                          Padding(
+                            padding:
+                                const EdgeInsets.fromLTRB(48, 2, 14, 6),
+                            child: Row(
+                              children: [
+                                SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 1.5,
+                                    color: const Color(0xFFDD2A7B)
+                                        .withValues(alpha: 0.6),
                                   ),
                                 ),
-                                const SizedBox(height: 2),
+                                const SizedBox(width: 6),
                                 Text(
-                                  _formatTime(commentCreatedAt),
+                                  'typing...',
                                   style: GoogleFonts.inter(
-                                      fontSize: 11, color: Colors.grey[500]),
+                                    fontSize: 11,
+                                    fontStyle: FontStyle.italic,
+                                    color: const Color(0xFFDD2A7B)
+                                        .withValues(alpha: 0.7),
+                                  ),
                                 ),
                               ],
                             ),
                           ),
-                        ],
-                      ),
+                      ],
                     );
                   }),
 

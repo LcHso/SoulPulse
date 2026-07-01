@@ -65,9 +65,9 @@ def migrate():
         "CREATE INDEX IF NOT EXISTS ix_interactions_is_decaying ON interactions(is_decaying)",
 
         # ── posts (Memory Echo feature) ──────────────────────────────────────
-        # memory_echo_refs: 引用的记忆 ID 列表（JSONB），默认空数组
+        # memory_echo_refs: 引用的记忆 ID 列表（JSON），默认空数组
         "ALTER TABLE posts ADD COLUMN memory_echo_refs JSON DEFAULT '[]'",
-        # emotion_snapshot: 生成帖子时的 5D 情绪快照（JSONB），nullable
+        # emotion_snapshot: 生成帖子时的 5D 情绪快照（JSON），nullable
         "ALTER TABLE posts ADD COLUMN emotion_snapshot JSON",
         # trigger_type: 触发类型（scheduled/happy_post/moody_story/memory_echo/gem_request）
         "ALTER TABLE posts ADD COLUMN trigger_type VARCHAR(20) DEFAULT 'scheduled'",

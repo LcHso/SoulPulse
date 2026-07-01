@@ -19,8 +19,9 @@ SoulPulse 帖子模型
 
 from datetime import datetime
 
-from sqlalchemy import String, Integer, Text, Boolean, DateTime, ForeignKey, func
+from sqlalchemy import String, Integer, Text, Boolean, DateTime, ForeignKey, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column
+from typing import Optional
 
 from core.database import Base
 
@@ -42,6 +43,9 @@ class Post(Base):
         like_count: 点赞数
         is_close_friend: 是否密友专属
         status: 审核状态（0=待审核, 1=已发布, 2=已拒绝）
+        memory_echo_refs: 记忆回响引用的记忆 ID 列表（JSON，用于分析）
+        emotion_snapshot: 生成帖子时的 5D 情绪快照（JSON）
+        trigger_type: 触发类型（scheduled/happy_post/moody_story/memory_echo/gem_request）
         created_at: 发布时间
     """
     __tablename__ = "posts"
@@ -69,6 +73,17 @@ class Post(Base):
     # 审核状态：0=待审核, 1=已发布, 2=已拒绝
     # 建立索引便于管理后台筛选
     status: Mapped[int] = mapped_column(Integer, default=0, index=True)
+
+    # ── 记忆回响字段 (Memory Echo) ──────────────────────────────
+    # 引用的记忆 ID 列表（JSON）：用于追踪帖子引用了哪些用户记忆
+    # 格式示例：[{"memory_id": 123, "user_id": 456}, ...]
+    memory_echo_refs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True, default=list)
+    # 生成帖子时的 5D 情绪快照（JSON）：记录生成瞬间的情绪状态
+    # 格式示例：{"energy": 80, "pleasure": 0.5, "activation": 0.3, "longing": 0.2, "security": 0.7}
+    emotion_snapshot: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, default=None)
+    # 触发类型：scheduled（定时）/ happy_post（快乐帖）/ moody_story（情绪故事）
+    #           / memory_echo（记忆回响）/ gem_request（宝石请求）
+    trigger_type: Mapped[str] = mapped_column(String(20), default="scheduled")
 
     # ── 时间戳字段 ──────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

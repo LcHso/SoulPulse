@@ -66,6 +66,7 @@ from services.image_gen_service import (
 )
 from services.nai_image_service import nai_service
 from services.video_gen_service import generate_video, generate_video_with_image_ref
+from services.memory_echo_resolver import resolve_memory_echo, build_emotion_snapshot
 
 
 def _aggregate_mood_hint(states: list[EmotionState]) -> str:
@@ -177,10 +178,15 @@ async def generate_new_post():
         1. 获取所有 AI 角色，基于当前小时轮询选择一个
         2. 随机决定帖子类型（80% 图片帖，20% 纯文字帖）
         3. 获取该角色的聚合情绪状态
-        4. 生成情绪感知的帖子文案
-        5. 对于图片帖：生成对应的 AI 图片
-        6. 创建帖子记录
-        7. 应用能量消耗
+        4. 解析记忆回响（Memory Echo）：从高亲密度用户中提取记忆素材
+        5. 生成情绪+记忆感知的帖子文案
+        6. 对于图片帖：生成对应的 AI 图片
+        7. 创建帖子记录（含记忆引用和情绪快照）
+        8. 应用能量消耗
+
+    记忆回响特性：
+        当角色与某用户亲密度 >= 5.0 时，帖子可能微妙地引用该用户的
+        聊天记忆（以 AI 自己的经历口吻），增强内容的情感温度。
 
     帖子类型：
         - image_only: 带图片的帖子（80% 概率）
@@ -283,6 +289,24 @@ async def generate_new_post():
             extra = f"right now you are: {routine_activity}"
             composed_mood_hint = f"{mood_hint}; {extra}" if mood_hint else extra
 
+        # ── 记忆回响 (Memory Echo) ──────────────────────────
+        # 查询高亲密度用户的记忆素材，注入到帖子 prompt 中
+        memory_echo_section = ""
+        memory_echo_refs: list = []
+        trigger_type = "scheduled"
+        try:
+            echo_result = await resolve_memory_echo(ai_id=persona.id)
+            memory_echo_section = echo_result["memory_echo_section"]
+            memory_echo_refs = echo_result["memory_echo_refs"]
+            trigger_type = echo_result["trigger_type"]
+            if memory_echo_section:
+                print(
+                    f"[scheduler] Memory echo resolved for {persona.name}: "
+                    f"{len(memory_echo_refs)} seeds from user_id={echo_result['source_user_id']}"
+                )
+        except Exception as e:
+            print(f"[scheduler] Memory echo resolution failed: {e}")
+
         # 步骤1：生成帖子文案
         caption = ""
         try:
@@ -293,6 +317,7 @@ async def generate_new_post():
                     style_tags=persona.ins_style_tags,
                     mood_hint=composed_mood_hint,
                     timezone_str=persona.timezone,
+                    memory_echo_section=memory_echo_section,
                 )
             else:
                 # 图片帖：生成简短文案
@@ -301,6 +326,7 @@ async def generate_new_post():
                     style_tags=persona.ins_style_tags,
                     mood_hint=composed_mood_hint,
                     timezone_str=persona.timezone,
+                    memory_echo_section=memory_echo_section,
                 )
         except Exception as e:
             print(f"[scheduler] Caption generation failed: {e}")
@@ -374,12 +400,16 @@ async def generate_new_post():
             except Exception as e:
                 print(f"[scheduler] Image generation failed: {e}")
 
-        # 步骤4：保存帖子记录
+        # 步骤4：保存帖子记录（含记忆回响与情绪快照）
+        emotion_snap = build_emotion_snapshot(emo_states)
         post = Post(
             ai_id=persona.id,
             media_url=media_url,
             caption=caption,
             post_type=post_type,
+            memory_echo_refs=memory_echo_refs,
+            emotion_snapshot=emotion_snap,
+            trigger_type=trigger_type,
         )
         db.add(post)
 
@@ -387,7 +417,8 @@ async def generate_new_post():
         await _apply_energy_cost_to_states(db, persona.id, "generate_post")
 
         await db.commit()
-        print(f"[scheduler] New {post_type} post by {persona.name}: {caption[:60]}...")
+        echo_tag = f" [memory_echo, {len(memory_echo_refs)} refs]" if memory_echo_refs else ""
+        print(f"[scheduler] New {post_type} post by {persona.name}: {caption[:60]}...{echo_tag}")
 
 
 async def generate_new_story():
