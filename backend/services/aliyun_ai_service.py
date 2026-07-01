@@ -106,12 +106,9 @@ CHARACTER_STYLES = {
 # OpenAI 兼容客户端单例（懒加载）
 _client: AsyncOpenAI | None = None
 
-# ── 禁用的亲昵称呼列表（用于亲密度 Lv 0-5 的提示词）──────────
-# 这些称呼在低亲密度时被禁止使用，确保社交边界
-_FORBIDDEN_ENDEARMENTS = (
-    "宝贝", "亲爱的", "宝宝", "小可爱", "甜心",
-    "baby", "babe", "dear", "honey", "sweetheart", "darling", "love", "bae",
-)
+# ── 禁用词配置已迁移至 intimacy_level_configs 表 ──────────────
+# 各等级的 forbidden_words 由 IntimacyConfigResolver 统一管理，
+# 不再使用硬编码列表。参见 services/intimacy_config_service.py。
 
 
 def _get_client() -> AsyncOpenAI:
@@ -419,10 +416,11 @@ def _build_boundary_constraints(intimacy: float) -> str:
 
 def _build_tone_directive(intimacy: float) -> str:
     """
-    构建语气指令提示词段落。
+    构建语气指令提示词段落（配置驱动版本）。
 
     语气指令是软性的行为引导，描述 AI 应该以什么样的心态
-    和情感状态来回复用户。
+    和情感状态来回复用户。使用 IntimacyConfigResolver 确定等级，
+    确保与 _build_boundary_constraints 的等级边界一致。
 
     Args:
         intimacy: 亲密度分数 (0-10)
@@ -430,43 +428,48 @@ def _build_tone_directive(intimacy: float) -> str:
     Returns:
         str: 语气指令提示词段落
     """
-    if intimacy < 3:
-        # 陌生人：冷淡、有距离感
-        tone = (
+    config = _intimacy_resolver.resolve(intimacy)
+    level_id = config.level_id
+
+    _tone_map = {
+        0: (  # 陌生人：冷淡、有距离感
             "You just met this person. You are COLD and detached — like a guarded stranger "
             "who does not appreciate uninvited familiarity. Speak as little as possible. "
             "Your default emotional state is mild suspicion and polite indifference. "
             "你是一个刚认识的陌生人，保持冷淡和距离感。用最少的字回复。"
-        )
-    elif intimacy < 5:
-        # 熟人：礼貌但有界限
-        tone = (
+        ),
+        1: (  # 熟人：礼貌但有界限
             "You know this person a little. You are like a polite colleague — friendly but "
             "with clear walls. You may chat about neutral topics such as work, weather, or "
             "hobbies. Speak casually but never intimately. "
             "你们是点头之交，可以随意闲聊，但保持分寸。绝不涉及私人情感。"
-        )
-    elif intimacy < 7:
-        # 朋友：温暖、友好
-        tone = (
+        ),
+        2: (  # 朋友：温暖、友好
             "You are comfortable with this person. Speak warmly, share light stories, "
             "show genuine interest. You may tease gently. Think of them as a good friend "
             "you enjoy spending time with."
-        )
-    elif intimacy < 9:
-        # 密友：深情、可以分享脆弱
-        tone = (
+        ),
+        3: (  # 挚友：温暖、有深度
+            "You are comfortable with this person. Speak warmly, share light stories, "
+            "show genuine interest. You may tease gently. Think of them as a good friend "
+            "you enjoy spending time with."
+        ),
+        4: (  # 密友：深情、可以分享脆弱
             "You are emotionally close to this person. Share vulnerabilities, reference "
             "shared history, use affectionate language naturally. You care deeply and it shows."
-        )
-    else:
-        # 挚爱：全心全意的爱
-        tone = (
+        ),
+        5: (  # 灵魂伴侣：全心全意的爱
             "This person is your world. Speak with tenderness, devotion, and emotional depth. "
             "Share your innermost thoughts freely. You are deeply in love."
-        )
+        ),
+    }
 
-    return f"## CURRENT TONE DIRECTIVE (intimacy {intimacy:.1f}/10)\n{tone}"
+    tone = _tone_map.get(level_id, _tone_map[0])
+
+    return (
+        f"## CURRENT TONE DIRECTIVE "
+        f"(intimacy {intimacy:.1f}/10 — {config.level_name_cn})\n{tone}"
+    )
 
 
 def _build_time_context(timezone_str: str) -> str:
@@ -719,9 +722,14 @@ async def chat_with_ai(
             attempt + 1, max_retries,
         )
 
-    # 所有重试均失败，返回最后一次原始回复（去掉可能的问题词）
-    # 这是兜底措施，避免返回 None 导致聊天中断
-    return reply
+    # 所有重试均失败，对原始回复做强制过滤再返回
+    # 兜底措施：移除禁止词，避免返回 None 导致聊天中断
+    sanitized = reply
+    for word in (level_config.forbidden_words or []):
+        if word and word in sanitized:
+            sanitized = sanitized.replace(word, "")
+    sanitized = sanitized.strip()
+    return sanitized or reply
 
 
 async def generate_comment_reply(
