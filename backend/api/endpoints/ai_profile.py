@@ -19,6 +19,7 @@ from models.user_like import UserLike
 from models.saved_post import SavedPost
 from models.emotion_state import EmotionState
 from services import emotion_engine
+from services.emotion_visual_mapper import compute_emotion_visual
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
 
@@ -58,6 +59,16 @@ class PostBrief(BaseModel):
     created_at: str
 
 
+class EmotionVisualOut(BaseModel):
+    border_hue: int
+    border_saturation: int
+    border_brightness: int
+    glow_intensity: int
+    shimmer_type: str
+    mood_label: str
+    updated_at: str = ""
+
+
 class AIProfileOut(BaseModel):
     id: int
     name: str
@@ -73,6 +84,7 @@ class AIProfileOut(BaseModel):
     is_following: bool
     intimacy_score: float
     intimacy_level: str
+    emotion_visual: Optional[EmotionVisualOut] = None
     posts: list[PostBrief]
 
 
@@ -83,6 +95,7 @@ class InteractionSummary(BaseModel):
     intimacy_score: float
     intimacy_level: str
     emotion_hint: dict
+    emotion_visual: Optional[EmotionVisualOut] = None
 
 
 class EmotionOut(BaseModel):
@@ -239,6 +252,16 @@ async def get_ai_profile(
     interaction = interaction_result.scalar_one_or_none()
     intimacy = interaction.intimacy_score if interaction else 0.0
 
+    # Compute emotion visual for avatar border
+    emo = await emotion_engine.get_or_create(db, current_user.id, ai_id)
+    emo_visual = compute_emotion_visual(
+        emo.energy, emo.pleasure, emo.activation, emo.longing, emo.security,
+    )
+    emotion_visual_out = EmotionVisualOut(
+        **emo_visual,
+        updated_at=to_utc_iso(emo.updated_at),
+    )
+
     # Follower count
     follower_result = await db.execute(
         select(func.count(Follow.id)).where(Follow.ai_id == ai_id)
@@ -309,6 +332,7 @@ async def get_ai_profile(
         is_following=is_following,
         intimacy_score=intimacy,
         intimacy_level=_intimacy_level(intimacy),
+        emotion_visual=emotion_visual_out,
         posts=post_briefs,
     )
 
@@ -397,6 +421,39 @@ async def get_emotion_status(
     )
 
 
+# ── Emotion visual (avatar border) ─────────────────────────────
+
+@router.get("/emotion-visual/{ai_id}", response_model=EmotionVisualOut)
+async def get_emotion_visual(
+    ai_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Get avatar border visual parameters derived from the user-AI 5D emotion state.
+
+    Returns HSL-based border color, glow intensity, shimmer type, and a Chinese
+    mood label that the front-end can render directly.
+    """
+    # Verify persona exists and is accessible
+    persona_result = await db.execute(
+        select(AIPersona).where(AIPersona.id == ai_id)
+    )
+    persona = persona_result.scalar_one_or_none()
+    if not persona:
+        raise HTTPException(status_code=404, detail="AI persona not found")
+    if persona.creator_user_id is not None and persona.creator_user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="AI persona not found")
+
+    emo = await emotion_engine.get_or_create(db, current_user.id, ai_id)
+    visual = compute_emotion_visual(
+        emo.energy, emo.pleasure, emo.activation, emo.longing, emo.security,
+    )
+    return EmotionVisualOut(
+        **visual,
+        updated_at=to_utc_iso(emo.updated_at),
+    )
+
+
 # ── Interactions summary ────────────────────────────────────────
 
 @router.get("/interactions/summary", response_model=list[InteractionSummary])
@@ -433,6 +490,9 @@ async def get_interactions_summary(
 
         emo = await emotion_engine.get_or_create(db, current_user.id, interaction.ai_id)
         hint = emotion_engine.build_emotion_hint(emo)
+        visual = compute_emotion_visual(
+            emo.energy, emo.pleasure, emo.activation, emo.longing, emo.security,
+        )
 
         summaries.append(InteractionSummary(
             ai_id=interaction.ai_id,
@@ -441,6 +501,10 @@ async def get_interactions_summary(
             intimacy_score=interaction.intimacy_score,
             intimacy_level=_intimacy_level(interaction.intimacy_score),
             emotion_hint=hint,
+            emotion_visual=EmotionVisualOut(
+                **visual,
+                updated_at=to_utc_iso(emo.updated_at),
+            ),
         ))
 
     summaries.sort(key=lambda s: s.intimacy_score, reverse=True)

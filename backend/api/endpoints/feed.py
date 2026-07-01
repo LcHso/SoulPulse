@@ -49,7 +49,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete as sql_delete, update as sql_update
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 import asyncio
 import random
@@ -70,15 +70,80 @@ from models.user_like import UserLike
 from models.saved_post import SavedPost
 from models.story_view import StoryView
 from models.notification import Notification
+from models.emotion_state import EmotionState
 from services import memory_service, emotion_engine, anchor_service, embedding_service
 from services.aliyun_ai_service import generate_comment_reply
+from services.emotion_visual_mapper import compute_emotion_visual
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/feed", tags=["feed"])
 
 
+# ── 亲密度延迟回复配置 ────────────────────────────────────
+# 亲密度层级 → 延迟秒数范围 (min, max)
+# 层级越高（越亲密），延迟越短，模拟真人对不同关系回复速度的差异
+REPLY_DELAY_RANGES = {
+    0: (60, 300),    # 陌生人 (intimacy 0-2):   1-5 分钟
+    1: (60, 180),    # 熟人   (intimacy 2-4):   1-3 分钟
+    2: (30, 90),     # 朋友   (intimacy 4-6):   30秒-1.5分钟
+    3: (15, 60),     # 挚友   (intimacy 6-7.5): 15秒-1分钟
+    4: (10, 45),     # 密友   (intimacy 7.5-9): 10-45秒
+    5: (5, 30),      # 灵魂伴侣 (intimacy 9+):  5-30秒
+}
+
+
+def _intimacy_to_tier(intimacy_score: float) -> int:
+    """
+    将亲密度评分（0-10）映射为延迟回复层级（0-5）。
+
+    Args:
+        intimacy_score: 亲密度评分（0-10 浮点数）
+
+    Returns:
+        int: 延迟回复层级（0=陌生人，5=灵魂伴侣）
+    """
+    if intimacy_score < 2.0:
+        return 0  # 陌生人
+    elif intimacy_score < 4.0:
+        return 1  # 熟人
+    elif intimacy_score < 6.0:
+        return 2  # 朋友
+    elif intimacy_score < 7.5:
+        return 3  # 挚友
+    elif intimacy_score < 9.0:
+        return 4  # 密友
+    else:
+        return 5  # 灵魂伴侣
+
+
+def calculate_reply_delay(intimacy_tier: int) -> int:
+    """
+    根据亲密度层级计算 AI 回复延迟秒数。
+
+    层级越高延迟越短，模拟真人对亲密关系回复更快的行为模式。
+
+    Args:
+        intimacy_tier: 亲密度层级（0-5）
+
+    Returns:
+        int: 延迟秒数
+    """
+    min_s, max_s = REPLY_DELAY_RANGES.get(intimacy_tier, (60, 300))
+    return random.randint(min_s, max_s)
+
+
 # ── Pydantic 数据模型 ────────────────────────────────────
+
+class EmotionVisualBrief(BaseModel):
+    """头像边框视觉参数（精简版，嵌入在帖子/角色信息中返回）。"""
+    border_hue: int
+    border_saturation: int
+    border_brightness: int
+    glow_intensity: int
+    shimmer_type: str
+    mood_label: str
+
 
 class PostOut(BaseModel):
     """
@@ -95,6 +160,7 @@ class PostOut(BaseModel):
         is_close_friend: 是否为密友可见帖子
         is_liked: 当前用户是否已点赞
         is_saved: 当前用户是否已收藏
+        emotion_visual: 情绪头像边框视觉参数
         created_at: 创建时间
     """
     id: int
@@ -107,6 +173,7 @@ class PostOut(BaseModel):
     is_close_friend: bool
     is_liked: bool = False
     is_saved: bool = False
+    emotion_visual: Optional[EmotionVisualBrief] = None
     created_at: str
 
 
@@ -160,6 +227,21 @@ async def get_posts(
     else:
         intimacy_map = {}
 
+    # 批量加载用户与各角色的情绪状态，用于头像边框视觉参数
+    emotion_visual_map: dict[int, EmotionVisualBrief] = {}
+    if ai_ids:
+        emo_result = await db.execute(
+            select(EmotionState).where(
+                EmotionState.user_id == current_user.id,
+                EmotionState.ai_id.in_(ai_ids),
+            )
+        )
+        for emo in emo_result.scalars().all():
+            visual = compute_emotion_visual(
+                emo.energy, emo.pleasure, emo.activation, emo.longing, emo.security,
+            )
+            emotion_visual_map[emo.ai_id] = EmotionVisualBrief(**visual)
+
     # 批量加载用户的点赞和收藏状态
     post_ids = [post.id for post, _ in rows]
     liked_ids = set()
@@ -202,6 +284,7 @@ async def get_posts(
             is_close_friend=post.is_close_friend,
             is_liked=post.id in liked_ids,
             is_saved=post.id in saved_ids,
+            emotion_visual=emotion_visual_map.get(post.ai_id),
             created_at=to_utc_iso(post.created_at),
         )
         for post, persona in filtered
@@ -257,6 +340,22 @@ async def get_post(
     )
     is_saved = saved_result.scalar_one_or_none() is not None
 
+    # 获取该角色的情绪视觉参数
+    emo_result = await db.execute(
+        select(EmotionState).where(
+            EmotionState.user_id == current_user.id,
+            EmotionState.ai_id == post.ai_id,
+        )
+    )
+    emo_state = emo_result.scalar_one_or_none()
+    emotion_vis = None
+    if emo_state:
+        visual = compute_emotion_visual(
+            emo_state.energy, emo_state.pleasure, emo_state.activation,
+            emo_state.longing, emo_state.security,
+        )
+        emotion_vis = EmotionVisualBrief(**visual)
+
     return PostOut(
         id=post.id,
         ai_id=persona.id,
@@ -268,6 +367,7 @@ async def get_post(
         is_close_friend=post.is_close_friend,
         is_liked=is_liked,
         is_saved=is_saved,
+        emotion_visual=emotion_vis,
         created_at=to_utc_iso(post.created_at),
     )
 
@@ -515,6 +615,22 @@ async def get_saved_posts(
         )
         liked_ids = {row[0] for row in likes_result.all()}
 
+    # 批量加载情绪视觉参数
+    saved_ai_ids = list({post.ai_id for post, _, _ in rows})
+    saved_emo_visual: dict[int, EmotionVisualBrief] = {}
+    if saved_ai_ids:
+        emo_result = await db.execute(
+            select(EmotionState).where(
+                EmotionState.user_id == current_user.id,
+                EmotionState.ai_id.in_(saved_ai_ids),
+            )
+        )
+        for emo in emo_result.scalars().all():
+            visual = compute_emotion_visual(
+                emo.energy, emo.pleasure, emo.activation, emo.longing, emo.security,
+            )
+            saved_emo_visual[emo.ai_id] = EmotionVisualBrief(**visual)
+
     return [
         PostOut(
             id=post.id,
@@ -527,6 +643,7 @@ async def get_saved_posts(
             is_close_friend=post.is_close_friend,
             is_liked=post.id in liked_ids,
             is_saved=True,
+            emotion_visual=saved_emo_visual.get(post.ai_id),
             created_at=to_utc_iso(post.created_at),
         )
         for post, persona, _ in rows
@@ -690,6 +807,27 @@ class CommentIn(BaseModel):
     content: str
 
 
+class AiReplyStatus(BaseModel):
+    """
+    AI 回复状态子模型。
+
+    status:
+        - "pending":   AI 已看到评论，回复尚未生成
+        - "delivered": AI 回复已生成并展示
+        - "none":      该评论不需要 AI 回复（AI 发的评论或无需回复的场景）
+
+    Attributes:
+        status: 回复状态（pending / delivered / none）
+        text: AI 回复文本（delivered 时有值）
+        estimated_at: 预计回复时间（pending 时有值，ISO-8601 格式）
+        delivered_at: 实际回复时间（delivered 时有值，ISO-8601 格式）
+    """
+    status: str  # "pending" | "delivered" | "none"
+    text: Optional[str] = None
+    estimated_at: Optional[str] = None
+    delivered_at: Optional[str] = None
+
+
 class CommentOut(BaseModel):
     """
     评论输出模型。
@@ -704,6 +842,8 @@ class CommentOut(BaseModel):
         content: 评论内容
         author_name: 作者名称
         author_avatar: 作者头像
+        ai_seen: AI 是否已看到该评论
+        ai_reply: AI 回复状态（仅用户评论时有效）
         created_at: 创建时间
     """
     id: int
@@ -715,6 +855,8 @@ class CommentOut(BaseModel):
     content: str
     author_name: str
     author_avatar: str
+    ai_seen: bool = False
+    ai_reply: Optional[AiReplyStatus] = None
     created_at: str
 
 
@@ -728,6 +870,11 @@ async def get_comments(
 ):
     """
     获取帖子的评论列表（分页）。
+
+    每条评论包含 ai_reply 状态对象：
+    - pending:   AI 已看到但尚未回复，附带预计回复时间
+    - delivered: AI 回复已生成，附带回复文本和时间
+    - none:      AI 评论或无需回复的场景
 
     Args:
         post_id: 帖子 ID
@@ -762,6 +909,31 @@ async def get_comments(
         ais_result = await db.execute(select(AIPersona).where(AIPersona.id.in_(ai_ids)))
         ai_map = {a.id: a for a in ais_result.scalars().all()}
 
+    # 批量查询 AI 回复评论：找到所有 reply_to 指向当前评论列表的 AI 回复
+    comment_ids = [c.id for c in comments]
+    ai_reply_map: dict[int, Comment] = {}  # parent_comment_id -> AI reply Comment
+    if comment_ids:
+        ai_replies_result = await db.execute(
+            select(Comment).where(
+                Comment.post_id == post_id,
+                Comment.is_ai_reply == 1,
+                Comment.reply_to.in_(comment_ids),
+            )
+        )
+        for ai_reply in ai_replies_result.scalars().all():
+            if ai_reply.reply_to is not None:
+                ai_reply_map[ai_reply.reply_to] = ai_reply
+
+    # 确保 AI 回复评论的作者信息也被加载
+    for ai_reply in ai_reply_map.values():
+        if ai_reply.ai_id and ai_reply.ai_id not in ai_map:
+            ais_result = await db.execute(
+                select(AIPersona).where(AIPersona.id == ai_reply.ai_id)
+            )
+            persona = ais_result.scalar_one_or_none()
+            if persona:
+                ai_map[persona.id] = persona
+
     out = []
     for c in comments:
         if c.is_ai_reply and c.ai_id:
@@ -772,6 +944,33 @@ async def get_comments(
             user = user_map.get(c.user_id)
             author_name = user.nickname if user else "User"
             author_avatar = user.avatar_url or "" if user else ""
+
+        # 构建 ai_reply 状态
+        ai_reply_status: Optional[AiReplyStatus] = None
+        if not c.is_ai_reply and c.user_id:
+            # 这是用户评论，检查是否有 AI 回复
+            ai_reply_comment = ai_reply_map.get(c.id)
+            if ai_reply_comment:
+                # AI 回复已生成
+                ai_reply_status = AiReplyStatus(
+                    status="delivered",
+                    text=ai_reply_comment.content,
+                    delivered_at=to_utc_iso(ai_reply_comment.created_at),
+                )
+            elif c.ai_seen and c.ai_reply_at:
+                # AI 已看到但尚未回复
+                ai_reply_status = AiReplyStatus(
+                    status="pending",
+                    text=None,
+                    estimated_at=to_utc_iso(c.ai_reply_at),
+                )
+            else:
+                # 兜底：旧数据无 ai_seen 标记
+                ai_reply_status = AiReplyStatus(status="none")
+        elif c.is_ai_reply:
+            # AI 回复评论本身不需要 ai_reply 状态
+            ai_reply_status = None
+
         out.append(CommentOut(
             id=c.id,
             post_id=c.post_id,
@@ -782,6 +981,8 @@ async def get_comments(
             content=c.content,
             author_name=author_name,
             author_avatar=author_avatar,
+            ai_seen=bool(c.ai_seen),
+            ai_reply=ai_reply_status,
             created_at=to_utc_iso(c.created_at),
         ))
     return out
@@ -795,10 +996,13 @@ async def create_comment(
     current_user: User = Depends(get_current_user),
 ):
     """
-    发表评论并安排延迟的 AI 回复。
+    发表评论并安排基于亲密度的延迟 AI 回复。
 
-    用户发表评论后，AI 会在 1-5 分钟后回复，
-    模拟真实的社交媒体交互体验。
+    用户发表评论后：
+    1. 立即标记 ai_seen=True、ai_seen_at=NOW()
+    2. 根据用户与该 AI 的亲密度层级计算延迟时间
+    3. 计算 ai_reply_at=NOW()+delay 并持久化到 DB
+    4. 启动后台延迟任务，到期后生成 AI 回复
 
     Args:
         post_id: 帖子 ID
@@ -807,7 +1011,7 @@ async def create_comment(
         current_user: 当前已认证用户
 
     Returns:
-        CommentOut: 新创建的评论
+        CommentOut: 新创建的评论（含 ai_reply 预计状态）
 
     Raises:
         HTTPException: 帖子不存在或评论为空时返回错误
@@ -821,18 +1025,7 @@ async def create_comment(
     if not content:
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
 
-    # 创建评论
-    comment = Comment(
-        post_id=post_id,
-        user_id=current_user.id,
-        ai_id=None,
-        is_ai_reply=0,
-        reply_to=None,
-        content=content,
-    )
-    db.add(comment)
-
-    # 更新亲密度
+    # 查询亲密度，计算延迟回复时间
     interaction_result = await db.execute(
         select(Interaction).where(
             Interaction.user_id == current_user.id,
@@ -840,6 +1033,28 @@ async def create_comment(
         )
     )
     interaction = interaction_result.scalar_one_or_none()
+    intimacy_score = interaction.intimacy_score if interaction else 0.0
+    intimacy_tier = _intimacy_to_tier(intimacy_score)
+    delay_seconds = calculate_reply_delay(intimacy_tier)
+
+    now = datetime.now(timezone.utc)
+    reply_at = now + timedelta(seconds=delay_seconds)
+
+    # 创建评论，立即标记 AI 已看到并记录计划回复时间
+    comment = Comment(
+        post_id=post_id,
+        user_id=current_user.id,
+        ai_id=None,
+        is_ai_reply=0,
+        reply_to=None,
+        content=content,
+        ai_seen=True,
+        ai_seen_at=now,
+        ai_reply_at=reply_at,
+    )
+    db.add(comment)
+
+    # 更新亲密度
     if interaction:
         interaction.intimacy_score = min(interaction.intimacy_score + 0.3, 10.0)
     else:
@@ -857,7 +1072,7 @@ async def create_comment(
     await db.commit()
     await db.refresh(comment)
 
-    # 安排延迟的 AI 回复后台任务
+    # 安排基于亲密度层级的延迟 AI 回复后台任务
     asyncio.create_task(
         _delayed_ai_reply(
             comment_id=comment.id,
@@ -867,7 +1082,13 @@ async def create_comment(
             user_nickname=current_user.nickname,
             user_comment=content,
             post_caption=post.caption,
+            delay_seconds=delay_seconds,
         )
+    )
+
+    logger.info(
+        "[comment-reply] User %d commented on post %d, AI reply scheduled in %ds (tier=%d, intimacy=%.1f)",
+        current_user.id, post_id, delay_seconds, intimacy_tier, intimacy_score,
     )
 
     return CommentOut(
@@ -880,6 +1101,12 @@ async def create_comment(
         content=comment.content,
         author_name=current_user.nickname,
         author_avatar=current_user.avatar_url or "",
+        ai_seen=True,
+        ai_reply=AiReplyStatus(
+            status="pending",
+            text=None,
+            estimated_at=to_utc_iso(reply_at),
+        ),
         created_at=to_utc_iso(comment.created_at),
     )
 
@@ -892,11 +1119,13 @@ async def _delayed_ai_reply(
     user_nickname: str,
     user_comment: str,
     post_caption: str,
+    delay_seconds: int,
 ):
     """
-    后台任务：等待 1-5 分钟后生成并保存 AI 回复。
+    后台任务：等待指定秒数后生成并保存 AI 回复。
 
-    延迟回复模拟真实的社交媒体交互体验。
+    延迟时间由调用方根据亲密度层级计算并传入。
+    ai_reply_at 已在评论创建时持久化到 DB，前端可据此轮询。
     回复生成时会考虑用户的亲密度、记忆和情绪状态。
 
     Args:
@@ -907,11 +1136,10 @@ async def _delayed_ai_reply(
         user_nickname: 用户昵称
         user_comment: 用户评论内容
         post_caption: 帖子文案
+        delay_seconds: 延迟秒数（由 calculate_reply_delay 计算）
     """
-    # 随机延迟 1-5 分钟
-    delay = random.randint(60, 300)
-    logger.info("[comment-reply] Scheduled AI reply for comment %d in %ds", comment_id, delay)
-    await asyncio.sleep(delay)
+    logger.info("[comment-reply] Scheduled AI reply for comment %d in %ds", comment_id, delay_seconds)
+    await asyncio.sleep(delay_seconds)
 
     try:
         async with async_session() as db:

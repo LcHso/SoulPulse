@@ -41,6 +41,7 @@ from typing import Optional
 from core.database import get_db
 from core.security import hash_password, verify_password, create_access_token, get_current_user
 from models.user import User
+from models.notification_preference import NotificationPreference
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -174,6 +175,12 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.commit()
     await db.refresh(user)
+
+    # 自动创建通知偏好默认记录（全部开启）
+    notif_pref = NotificationPreference(user_id=user.id)
+    db.add(notif_pref)
+    await db.commit()
+
     return UserOut(
         id=user.id, email=user.email, nickname=user.nickname,
         avatar_url=user.avatar_url, gender=user.gender,

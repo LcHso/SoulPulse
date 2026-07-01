@@ -37,6 +37,17 @@ from models.character_launch import (  # noqa: F401
 from models.subscription import SubscriptionTier, UserSubscription  # noqa: F401
 from models.event_campaign import EventCampaign, UserEventProgress  # noqa: F401
 
+# 推送通知系统
+from models.notification_preference import NotificationPreference  # noqa: F401
+from models.user_device import UserDevice  # noqa: F401
+from models.notification_log import NotificationLog  # noqa: F401
+
+# 主动 DM 系统（思念触发）
+from models.proactive_dm_log import ProactiveDMLog  # noqa: F401
+
+# 亲密度分层行为参数配置
+from models.intimacy_level_config import IntimacyLevelConfig  # noqa: F401
+
 __all__ = [
     "CharacterDesign",
     "CGIllustration",
@@ -55,4 +66,9 @@ __all__ = [
     "UserSubscription",
     "EventCampaign",
     "UserEventProgress",
+    "NotificationPreference",
+    "UserDevice",
+    "NotificationLog",
+    "ProactiveDMLog",
+    "IntimacyLevelConfig",
 ]

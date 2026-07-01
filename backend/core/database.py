@@ -153,6 +153,12 @@ async def init_db():
     import models.event_campaign  # noqa: F401
     # 角色发布管线与轮换 (Plan Task 9.3-9.4)
     import models.character_launch  # noqa: F401
+    # 主动 DM 系统（思念触发）
+    import models.proactive_dm_log  # noqa: F401
+    # 推送通知系统
+    import models.notification_preference  # noqa: F401
+    import models.user_device  # noqa: F401
+    import models.notification_log  # noqa: F401
 
     # 创建所有数据表
     async with engine.begin() as conn:
@@ -243,6 +249,19 @@ async def init_db():
                 "total_interaction_days": "ALTER TABLE interactions ADD COLUMN total_interaction_days INTEGER DEFAULT 0",
             }
             for col, sql in interaction_retention_migrations.items():
+                try:
+                    await conn.execute(text(f"SELECT {col} FROM interactions LIMIT 1"))
+                except Exception:
+                    await conn.execute(text(sql))
+                    print(f"[database] Added {col} column to interactions table")
+
+            # ── 数据库迁移：interactions 表添加主动 DM 系统字段 ──────────────────
+            # last_proactive_dm_at / proactive_dm_count
+            interaction_proactive_dm_migrations = {
+                "last_proactive_dm_at": "ALTER TABLE interactions ADD COLUMN last_proactive_dm_at TIMESTAMP",
+                "proactive_dm_count": "ALTER TABLE interactions ADD COLUMN proactive_dm_count INTEGER DEFAULT 0",
+            }
+            for col, sql in interaction_proactive_dm_migrations.items():
                 try:
                     await conn.execute(text(f"SELECT {col} FROM interactions LIMIT 1"))
                 except Exception:
